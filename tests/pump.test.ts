@@ -1,0 +1,148 @@
+// @vitest-environment jsdom
+import { afterEach, beforeAll, beforeEach, expect, it, vi } from "vitest";
+import { readFile } from "node:fs/promises";
+import { createRequire } from "node:module";
+import type { PluginRpcClient } from "@get-bb/plugin-sdk/app";
+import type { rpcContract } from "../server";
+import { TerminalPump } from "../lib/pump";
+
+const assets = vi.hoisted(() => ({ url: "" }));
+vi.mock("../lib/ghostty", async (original) => {
+  const actual = await original<typeof import("../lib/ghostty")>();
+  const { GhosttyCore } = await import("@wterm/ghostty");
+  return {
+    ...actual,
+    loadCore: async () =>
+      actual.supportAnyEventMouseMode(
+        await GhosttyCore.load({ wasmPath: assets.url }),
+      ),
+  };
+});
+const pumps: TerminalPump[] = [];
+beforeAll(async () => {
+  const bytes = await readFile(
+    createRequire(import.meta.url).resolve("@wterm/ghostty/ghostty-vt.wasm"),
+  );
+  assets.url = `data:application/wasm;base64,${bytes.toString("base64")}`;
+});
+beforeEach(() => {
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      observe() {}
+      disconnect() {}
+    },
+  );
+  vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(
+    function (this: HTMLElement) {
+      const width =
+        this.tagName === "SPAN" ? (this.textContent?.length ?? 1) * 8 : 640;
+      return {
+        width,
+        height: 16,
+        top: 0,
+        left: 0,
+        right: width,
+        bottom: 16,
+        x: 0,
+        y: 0,
+        toJSON() {},
+      };
+    },
+  );
+});
+afterEach(() => {
+  for (const pump of pumps.splice(0)) pump.dispose();
+  document.body.replaceChildren();
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
+const output = (text: string, seq = 1) => ({
+  chunks: text ? [{ seq, dataBase64: btoa(text) }] : [],
+  nextSeq: seq,
+  truncated: false,
+  status: "running",
+  exitCode: null,
+});
+function createPump(
+  call = vi.fn(async (method: string, input: Record<string, unknown>) =>
+    method === "read" ? output(input.replay ? "Boo\x1b[6n" : "") : { ok: true },
+  ),
+) {
+  const container = document.createElement("div");
+  Object.defineProperties(container, {
+    clientWidth: { value: 640 },
+    clientHeight: { value: 384 },
+  });
+  document.body.append(container);
+  const onStatus = vi.fn();
+  const pump = new TerminalPump({
+    container,
+    rpc: { call } as PluginRpcClient<typeof rpcContract>,
+    terminalId: "owned",
+    fontSize: 13,
+    onStatus,
+    onRequestRestart: vi.fn(),
+    onToggleRequested: vi.fn(),
+  });
+  pumps.push(pump);
+  pump.setVisible(true);
+  return { pump, container, call, onStatus };
+}
+it("renders actual Ghostty output and suppresses replay-generated terminal replies", async () => {
+  const { container, call } = createPump();
+  await vi.waitFor(() => expect(container.textContent).toContain("Boo"));
+  expect(container.dataset.renderer).toBe("ghostty");
+  expect(call.mock.calls.filter(([method]) => method === "write")).toHaveLength(
+    0,
+  );
+});
+it("stops polling when hidden and keeps the rendered buffer on reopen", async () => {
+  const { pump, container, call } = createPump();
+  await vi.waitFor(() => expect(container.textContent).toContain("Boo"));
+  pump.setVisible(false);
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  const reads = call.mock.calls.filter(([method]) => method === "read").length;
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  expect(call.mock.calls.filter(([method]) => method === "read")).toHaveLength(
+    reads,
+  );
+  pump.setVisible(true);
+  await vi.waitFor(() =>
+    expect(
+      call.mock.calls.filter(([method]) => method === "read").length,
+    ).toBeGreaterThan(reads),
+  );
+  expect(container.textContent).toContain("Boo");
+  expect(
+    call.mock.calls.filter(
+      ([method, input]) => method === "read" && input.replay,
+    ),
+  ).toHaveLength(1);
+});
+it("serializes input and applies bracketed paste requested by the application", async () => {
+  const call = vi.fn(async (method: string, input: Record<string, unknown>) =>
+    method === "read"
+      ? output(input.replay ? "ready\x1b[?2004h" : "")
+      : { ok: true },
+  );
+  const { pump, container } = createPump(call);
+  await vi.waitFor(() => expect(container.textContent).toContain("ready"));
+  pump.paste("hello\nworld");
+  await vi.waitFor(() =>
+    expect(call.mock.calls.some(([method]) => method === "write")).toBe(true),
+  );
+  const writes = call.mock.calls.filter(([method]) => method === "write");
+  expect(
+    writes.map(([, input]) => atob(String(input.dataBase64))).join(""),
+  ).toBe("\x1b[200~hello\nworld\x1b[201~");
+});
+it("cleans up the DOM and ignores pending output after disposal", async () => {
+  const { pump, container, call } = createPump();
+  await vi.waitFor(() => expect(container.textContent).toContain("Boo"));
+  pump.dispose();
+  const count = call.mock.calls.length;
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  expect(container.childElementCount).toBe(0);
+  expect(call.mock.calls).toHaveLength(count);
+});
