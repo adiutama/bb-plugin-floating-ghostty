@@ -1,0 +1,390 @@
+@import "./fonts/nerd-symbols.css";
+
+/*
+ * Everything Tailwind utilities cannot express for the floating window.
+ * All rules are scoped under .bb-fg-window so nothing here can reach the rest
+ * of the bb app — including the terminal CSS imported alongside it.
+ */
+
+/*
+ * Show/hide is one authored motion moment: the window grows out of its
+ * bottom-left corner, pointing back at the sidebar footer button that opens
+ * it. Only opacity and transform animate, so the layout box is final from the
+ * first frame and Ghostty never has to reflow mid-animation. The delayed
+ * visibility transition keeps the element interactive-none and invisible
+ * after the exit lands, with no JavaScript timers involved.
+ */
+.bb-fg-window {
+  transform-origin: 0% 100%;
+}
+
+.bb-fg-window[data-state="closed"] {
+  opacity: 0;
+  pointer-events: none;
+  transform: translate3d(-8px, 12px, 0) scale(0.97);
+  transition:
+    opacity 130ms cubic-bezier(0.4, 0, 1, 1),
+    transform 130ms cubic-bezier(0.4, 0, 1, 1),
+    visibility 0s linear 130ms;
+  visibility: hidden;
+}
+
+.bb-fg-window[data-state="open"] {
+  opacity: 1;
+  transform: translate3d(0, 0, 0) scale(1);
+  transition:
+    opacity 190ms cubic-bezier(0.16, 1, 0.3, 1),
+    transform 190ms cubic-bezier(0.16, 1, 0.3, 1);
+  visibility: visible;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bb-fg-window[data-state="closed"],
+  .bb-fg-window[data-state="open"] {
+    transition: none;
+  }
+}
+
+/* Let the terminal own the full body box; FitAddon sizes rows/cols to it. */
+.bb-fg-window .wterm {
+  height: 100%;
+  padding: 0;
+  border-radius: 0;
+  box-shadow: none;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+/* The tab strip scrolls horizontally without showing a scrollbar. */
+.bb-fg-window [role="tablist"] {
+  scrollbar-width: none;
+}
+
+.bb-fg-window [role="tablist"]::-webkit-scrollbar {
+  display: none;
+}
+
+/*
+ * Mobile: one sheet, inset on every side.
+ *
+ * A 760x460 window dragged around a phone screen is a desktop idea wearing the
+ * wrong clothes — at this width it either covers everything anyway or is too
+ * small to read, and the drag handle competes with the scroll gesture. So on a
+ * compact viewport the window stops being a window: it fills the viewport minus
+ * one even inset, the geometry moves from inline styles to here, and drag and
+ * resize are not installed at all.
+ *
+ * The inset is measured from the safe area, not the edge, so the sheet clears a
+ * notch and a home indicator instead of tucking under them. Height comes from
+ * dvh rather than a bottom offset because a fixed element resolves its
+ * containing block against the *large* viewport on iOS — with `bottom` the
+ * sheet would sit behind the URL bar exactly when the bar is showing.
+ */
+.bb-fg-window[data-layout="sheet"] {
+  --bb-fg-sheet-gap: 10px;
+  --bb-fg-sheet-top: calc(
+    var(--bb-fg-sheet-gap) + env(safe-area-inset-top, 0px)
+  );
+  --bb-fg-sheet-bottom: calc(
+    var(--bb-fg-sheet-gap) + env(safe-area-inset-bottom, 0px)
+  );
+
+  left: calc(var(--bb-fg-sheet-gap) + env(safe-area-inset-left, 0px));
+  right: calc(var(--bb-fg-sheet-gap) + env(safe-area-inset-right, 0px));
+  top: var(--bb-fg-sheet-top);
+  bottom: auto;
+  width: auto;
+  height: calc(100vh - var(--bb-fg-sheet-top) - var(--bb-fg-sheet-bottom));
+  height: calc(100dvh - var(--bb-fg-sheet-top) - var(--bb-fg-sheet-bottom));
+  /* Rises from the bottom edge rather than growing out of a corner button
+     that is not on screen at this width. */
+  transform-origin: 50% 100%;
+}
+
+.bb-fg-window[data-layout="sheet"][data-state="closed"] {
+  transform: translate3d(0, 16px, 0) scale(0.985);
+}
+
+/* Nothing here is draggable, so the bar must not advertise that it is — no
+   grab cursor, and no drag grip taking room a tab could use. */
+.bb-fg-window[data-layout="sheet"] [data-bb-fg-handle] {
+  cursor: default;
+}
+
+.bb-fg-window[data-layout="sheet"] [data-bb-fg-grip] {
+  display: none;
+}
+
+/*
+ * The scrim behind the sheet. Blurred rather than merely dimmed so the bb
+ * window reads as *behind* something solid instead of just darkened — at this
+ * size the sheet covers almost everything, and a flat dim leaves the edges
+ * looking like a rendering bug.
+ */
+.bb-fg-backdrop {
+  position: fixed;
+  inset: 0;
+  background: color-mix(in oklab, var(--background) 45%, transparent);
+}
+
+@supports (
+  (backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))
+) {
+  .bb-fg-backdrop {
+    background: color-mix(in oklab, var(--background) 22%, transparent);
+    -webkit-backdrop-filter: blur(16px) saturate(140%);
+    backdrop-filter: blur(16px) saturate(140%);
+  }
+}
+
+.bb-fg-backdrop[data-state="closed"] {
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity 130ms cubic-bezier(0.4, 0, 1, 1),
+    visibility 0s linear 130ms;
+  visibility: hidden;
+}
+
+.bb-fg-backdrop[data-state="open"] {
+  opacity: 1;
+  transition: opacity 190ms cubic-bezier(0.16, 1, 0.3, 1);
+  visibility: visible;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bb-fg-backdrop[data-state="closed"],
+  .bb-fg-backdrop[data-state="open"] {
+    transition: none;
+  }
+}
+
+/*
+ * Two sizing rules that have to live here rather than as utility classes.
+ *
+ * This plugin ships its own Tailwind build, and inside the host page its
+ * utility layer loses to bb's app CSS for `max-*` and the text sizes: on a
+ * measured page `min-h-0` and the vendored `max-h-[300px]` both land, while
+ * `max-h-none`, `max-h-full` and `max-w-24` all compute to `none`. Everything
+ * scoped under .bb-fg-window does apply, so the two caps that matter are set
+ * here where they are guaranteed to win.
+ */
+
+/* The empty window gives the picker a whole pane; the vendored menu cap would
+   strand it at 300px in the middle of it. */
+.bb-fg-window [data-bb-fg-fill] {
+  max-height: none;
+}
+
+/*
+ * At sheet width the machine name is the least important thing in the row, but
+ * "Vedrans-MacBook-Pro" is 151px of a 313px row — enough to truncate every
+ * project to "bb-plugin-co…". Cap it below the same breakpoint the sheet uses;
+ * wider rows have the room and keep the full name.
+ */
+@media (width < 48rem) {
+  .bb-fg-window [data-bb-fg-host] {
+    max-width: 6rem;
+  }
+}
+
+/*
+ * The on-screen key bar.
+ *
+ * Geometry lives here rather than in utility classes for the reason above — and
+ * because these are touch targets, where being silently ignored is the
+ * difference between a usable terminal and a decorative one. 40px is the floor
+ * Apple's HIG puts on a hit target; the bar scrolls horizontally rather than
+ * wrapping, so the row height never changes under a thumb.
+ */
+.bb-fg-window .bb-fg-keybar {
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  padding: 6px;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+
+.bb-fg-window .bb-fg-keybar::-webkit-scrollbar {
+  display: none;
+}
+
+.bb-fg-window .bb-fg-key {
+  flex: 0 0 auto;
+  min-width: 40px;
+  height: 40px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card);
+  color: var(--muted-foreground);
+  font-size: 13px;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  /* A key repeated by a thumb must not select its own label, and iOS must not
+     flash its tap highlight over a control that is already giving feedback. */
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+
+.bb-fg-window .bb-fg-key:active {
+  background: var(--state-active, var(--muted));
+  color: var(--foreground);
+}
+
+.bb-fg-window .bb-fg-key-strong {
+  color: var(--foreground);
+}
+
+/* Armed Ctrl has to be obvious: it silently changes what the next key does. */
+.bb-fg-window .bb-fg-key-armed {
+  border-color: var(--primary);
+  background: var(--primary);
+  color: var(--primary-foreground);
+}
+
+/*
+ * Keyboard-aware height. visualViewport reports the part of the page the
+ * keyboard has not covered; without this the sheet keeps its full height and
+ * the prompt sits behind the keys. The offset matters too — iOS scrolls the
+ * layout viewport under the visual one, and a fixed element follows the layout
+ * viewport.
+ */
+.bb-fg-window[data-layout="sheet"] {
+  top: calc(var(--bb-fg-viewport-top, 0px) + var(--bb-fg-sheet-top));
+  height: calc(
+    var(--bb-fg-viewport-height, 100dvh) - var(--bb-fg-sheet-top) -
+      var(--bb-fg-sheet-bottom)
+  );
+}
+
+/* The home-indicator inset is already inside the keyboard; counting it twice
+   leaves a dead strip above the keys. */
+.bb-fg-window[data-layout="sheet"][data-keyboard="open"] {
+  --bb-fg-sheet-bottom: var(--bb-fg-sheet-gap);
+}
+
+/*
+ * Above bb's own chrome.
+ *
+ * The window shipped at z-40, and bb's floating sidebar toggle lives in a fixed
+ * z-50 layer — so on a phone, where the sheet starts 10px from the top-left
+ * corner, that button sat on top of the first tab. bb's own stack goes up to
+ * 70, which is where its dialogs and toasts live; 55 clears the chrome without
+ * climbing over anything that is supposed to interrupt you.
+ */
+.bb-fg-window {
+  z-index: 55;
+}
+
+.bb-fg-backdrop {
+  z-index: 54;
+}
+
+/* Ghostty uses a DOM scroller, so touch panning stays browser-native. */
+.bb-fg-window .wterm {
+  touch-action: pan-y;
+  overscroll-behavior: contain;
+}
+
+/*
+ * Touch targets in the tab strip.
+ *
+ * The desktop strip is deliberately dense — 24px tabs, 24px buttons — which on
+ * a phone is well under the ~40px a thumb can hit reliably; the close X inside
+ * a tab was 14px. On a coarse pointer the strip grows and every control in it
+ * grows with it. Sizes live here rather than as utilities for the reason at the
+ * top of this section: the plugin's own `max-*` utilities lose to bb's CSS.
+ */
+@media (pointer: coarse) {
+  .bb-fg-window [data-bb-fg-tabbar] {
+    height: 48px;
+    gap: 6px;
+  }
+
+  .bb-fg-window [data-bb-fg-tabbar] [role="tab"] {
+    height: 38px;
+    max-width: 12rem;
+    border-radius: 10px;
+    font-size: 13px;
+  }
+
+  .bb-fg-window [data-bb-fg-tabbar] [role="tab"] > button {
+    width: 28px;
+    height: 28px;
+    /* Always visible: there is no hover to reveal it with. */
+    opacity: 1;
+  }
+
+  .bb-fg-window [data-bb-fg-tabbar] > button,
+  .bb-fg-window [data-bb-fg-tabbar] [data-bb-fg-action] {
+    width: 40px;
+    height: 40px;
+  }
+}
+
+/*
+ * The jump-to-latest pill: shown only while the view is parked in history, so
+ * new output may be landing out of sight below. Geometry here (see the note on
+ * utilities above); bottom-centred so it never covers the scrollbar.
+ */
+.bb-fg-window .bb-fg-pill {
+  position: absolute;
+  bottom: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 12px 0 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--card) 92%, transparent);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  color: var(--foreground);
+  font-size: 12px;
+  font-weight: 500;
+  box-shadow: 0 4px 16px rgb(0 0 0 / 0.25);
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+
+.bb-fg-window .bb-fg-pill:active {
+  background: var(--state-active, var(--muted));
+}
+
+@media (pointer: coarse) {
+  .bb-fg-window .bb-fg-pill {
+    height: 40px;
+    padding: 0 16px 0 12px;
+    font-size: 13px;
+  }
+}
+
+.bb-fg-ghost {
+  animation: bb-fg-hover 4s ease-in-out infinite;
+}
+@keyframes bb-fg-hover {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-4px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .bb-fg-ghost {
+    animation: none;
+  }
+}
+.bb-fg-window [data-renderer="ghostty"] {
+  background: #1e1e1e;
+  color: #d4d4d4;
+}
