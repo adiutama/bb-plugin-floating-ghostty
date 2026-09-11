@@ -19,7 +19,7 @@ command rm -f -- "$__bb_fg_dir/.zshenv" "$__bb_fg_dir/.zprofile" "$__bb_fg_dir/.
 command rmdir -- "$__bb_fg_dir" 2>/dev/null
 unset __bb_fg_dir BB_FLOATING_GHOSTTY_ZDOTDIR
 autoload -Uz add-zsh-hook
-__bb_fg_prompt() { builtin printf '\\033]0;bb-fg:shell:zsh\\007'; }
+__bb_fg_prompt() { builtin printf '\\033]1337;CurrentDir=%s\\007' "$PWD"; builtin printf '\\033]0;bb-fg:shell:zsh\\007'; }
 __bb_fg_preexec() {
   local -a words
   words=( \${(z)1} )
@@ -43,7 +43,7 @@ elif [[ -r ~/.bashrc ]]; then source ~/.bashrc
 fi
 command rm -f -- "$BB_FLOATING_GHOSTTY_RC"
 unset BB_FLOATING_GHOSTTY_RC
-__bb_fg_prompt() { local result=$?; builtin printf '\\033]0;bb-fg:shell:bash\\007'; return "$result"; }
+__bb_fg_prompt() { local result=$?; builtin printf '\\033]1337;CurrentDir=%s\\007' "$PWD"; builtin printf '\\033]0;bb-fg:shell:bash\\007'; return "$result"; }
 __bb_fg_preexec() {
   [[ "$BASH_COMMAND" == __bb_fg_* ]] && return
   local -a words
@@ -66,7 +66,10 @@ fi
 
 // Fish emits its title after fish_prompt/preexec events. Use its title function
 // so a later default directory title cannot overwrite the integration signal.
-const FISH_INIT = `function fish_title
+const FISH_INIT = `function __bb_fg_directory --on-event fish_prompt
+  printf '\\033]1337;CurrentDir=%s\\007' "$PWD"
+end
+function fish_title
   set -l executable (status current-command)
   if set -q argv[1]
     set -l words (string split ' ' -- $argv[1])

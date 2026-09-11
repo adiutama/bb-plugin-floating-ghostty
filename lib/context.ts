@@ -22,31 +22,29 @@ export function ownerOf(key: string) {
   };
 }
 
-export function availableHere(key: string, context: TerminalContext): boolean {
+/** Legacy worktree keys still resolve to their project. Home keys have no project. */
+export function projectScopeKey(key: string): string {
   const owner = ownerOf(key);
-  return (
-    owner.kind === "home" ||
-    (context.projectId !== null && owner.projectId === context.projectId)
-  );
+  return owner.projectId === null ? key : `project:${owner.projectId}`;
+}
+
+export function availableHere(key: string, context: TerminalContext): boolean {
+  return ownerOf(key).projectId === context.projectId;
 }
 
 export function contextKey(context: TerminalContext): string {
-  return context.environmentId === null
-    ? `project:${context.projectId ?? "global"}`
-    : `worktree:${context.projectId}:${context.environmentId}`;
+  return context.projectId === null
+    ? "no-project"
+    : `project:${context.projectId}`;
 }
 
+/** Creation prefers the thread's environment, while ownership stays with its project. */
 export function scopePriority(key: string, context: TerminalContext): number {
   const owner = ownerOf(key);
   if (!availableHere(key, context)) return 99;
-  if (
-    owner.kind === "worktree" &&
-    owner.environmentId === context.environmentId
-  )
-    return 0;
-  if (owner.kind === "project") return 1;
-  if (owner.kind === "home") return 2;
-  return 3; // Sibling worktrees are visitable, but never an automatic destination.
+  if (owner.kind === "worktree")
+    return owner.environmentId === context.environmentId ? 0 : 99;
+  return 1;
 }
 
 export function preferredTerminal<
@@ -64,14 +62,7 @@ export function preferredTerminal<
     const index = recent.indexOf(id);
     return index === -1 ? Number.MAX_SAFE_INTEGER : index;
   };
-  return available
-    .filter((tab) => scopePriority(tab.scopeKey, context) < 3)
-    .sort(
-      (a, b) =>
-        scopePriority(a.scopeKey, context) -
-          scopePriority(b.scopeKey, context) ||
-        rank(a.terminalId) - rank(b.terminalId),
-    )[0];
+  return available.sort((a, b) => rank(a.terminalId) - rank(b.terminalId))[0];
 }
 
 export function preferredScope(
@@ -80,7 +71,7 @@ export function preferredScope(
 ) {
   // Never silently fall back to a different machine when the intended one is offline.
   return scopes
-    .filter((scope) => scopePriority(scope.key, context) < 3)
+    .filter((scope) => scopePriority(scope.key, context) < 99)
     .sort(
       (a, b) =>
         scopePriority(a.key, context) - scopePriority(b.key, context) ||
@@ -91,14 +82,12 @@ export function preferredScope(
 }
 
 export function scopeLabel(key: string, scopes: ScopeOption[]): string {
-  const scope = scopes.find((item) => item.key === key);
   const owner = ownerOf(key);
-  if (owner.kind === "home") return "Global";
+  if (owner.projectId === null) return "No project";
   const project = scopes.find(
     (item) => item.key === `project:${owner.projectId}`,
   );
-  if (owner.kind === "project") return project?.label ?? "Project unavailable";
-  return `${project?.label ?? "Project"} / ${scope?.label ?? "Worktree unavailable"}`;
+  return project?.label ?? "Project unavailable";
 }
 
 interface SelectionMemory {

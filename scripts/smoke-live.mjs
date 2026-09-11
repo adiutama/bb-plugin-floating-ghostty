@@ -43,7 +43,7 @@ try {
     projectId: null,
     threadId: null,
   });
-  assert(global.scopes.every((scope) => scope.kind === "home"));
+  assert.equal(global.context.projectId, null);
   if (!initial.prefs.overrideNativeShortcut) {
     assert.deepEqual(await rpc("terminalShortcuts", null), []);
   }
@@ -69,16 +69,10 @@ try {
         current.cwd,
         "Worktree terminal started in the wrong checkout",
       );
-      assert.equal(worktree.opened.scopeKey, current.key);
-      const promoted = await rpc("promoteTab", {
-        terminalId: worktree.opened.terminalId,
-        target: "global",
-      });
-      const promotedTab = promoted.snapshot.tabs.find(
-        (tab) => tab.terminalId === worktree.opened.terminalId,
+      assert.equal(
+        worktree.opened.scopeKey,
+        `project:${resolved.context.projectId}`,
       );
-      assert.equal(promotedTab.scopeKey, `home:${current.hostId}`);
-      assert.equal(promotedTab.cwd, worktree.opened.cwd);
       const { restarted } = await rpc("restartTab", {
         terminalId: worktree.opened.terminalId,
         cols: 80,
@@ -86,19 +80,10 @@ try {
       });
       owned.delete(worktree.opened.terminalId);
       owned.add(restarted.terminalId);
-      assert.equal(restarted.scopeKey, promotedTab.scopeKey);
+      assert.equal(restarted.scopeKey, worktree.opened.scopeKey);
       assert.equal(restarted.cwd, current.cwd);
-      const narrowed = await rpc("setTabOwner", {
-        terminalId: restarted.terminalId,
-        scopeKey: current.key,
-      });
-      const narrowedTab = narrowed.snapshot.tabs.find(
-        (tab) => tab.terminalId === restarted.terminalId,
-      );
-      assert.equal(narrowedTab.scopeKey, current.key);
-      assert.equal(narrowedTab.cwd, current.cwd);
       console.log(
-        "PASS: Global visibility, opt-in shortcut default, worktree launch, ownership widening/narrowing, and original restart directory",
+        "PASS: Projectless context, opt-in shortcut default, project binding, worktree launch, and original restart directory",
       );
     }
   }
@@ -180,6 +165,25 @@ try {
   const startupOutput = replay.chunks
     .map((chunk) => Buffer.from(chunk.dataBase64, "base64").toString())
     .join("");
+  const directorySignal = [
+    ...startupOutput.matchAll(
+      /\x1b\]1337;CurrentDir=([^\x07\x1b]*)(?:\x07|\x1b\\)/g,
+    ),
+  ].at(-1)?.[1];
+  assert(
+    directorySignal?.startsWith("/"),
+    "The shell did not report its working directory",
+  );
+  const directoryState = await rpc("setTabCwd", {
+    terminalId: opened.terminalId,
+    cwd: directorySignal,
+  });
+  assert.equal(
+    directoryState.snapshot.tabs.find(
+      (tab) => tab.terminalId === opened.terminalId,
+    ).cwd,
+    directorySignal,
+  );
   const shellSignal = titlesIn(startupOutput)
     .filter((title) => title.startsWith("bb-fg:shell:"))
     .at(-1);
@@ -261,22 +265,18 @@ try {
     if (exitState.status === "exited") break;
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  assert.equal(
-    exitState.status,
-    "exited",
-    "Exited shell did not offer restart",
-  );
+  assert.equal(exitState.status, "exited", "Shell exit was not detected");
   assert.equal(exitState.exitCode, 7);
-  const { restarted } = await rpc("restartTab", {
-    terminalId: opened.terminalId,
-    cols: 100,
-    rows: 32,
-  });
+  const afterExit = await rpc("init", null);
+  assert(
+    !afterExit.snapshot.tabs.some(
+      (tab) => tab.terminalId === opened.terminalId,
+    ),
+    "Exited shell remained in the inventory",
+  );
   owned.delete(opened.terminalId);
-  owned.add(restarted.terminalId);
-  assert.notEqual(restarted.terminalId, opened.terminalId);
   console.log(
-    "PASS: authenticated WASM, real shell input/output, Ghostty rendering, resize, tab persistence, replay, restart",
+    "PASS: authenticated WASM, real shell input/output, Ghostty rendering, resize, tab persistence, replay, automatic exit removal",
   );
 } finally {
   core?.dispose();

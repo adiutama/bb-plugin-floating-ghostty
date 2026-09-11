@@ -112,6 +112,7 @@ export function tabsReducer(state: TabsState, action: TabsAction): TabsState {
         if (
           existing.shellTitle === tab.shellTitle &&
           existing.label === tab.label &&
+          existing.cwd === tab.cwd &&
           existing.scopeKey === tab.scopeKey &&
           (existing.customTitle ?? null) === (tab.customTitle ?? null)
         ) {
@@ -120,6 +121,7 @@ export function tabsReducer(state: TabsState, action: TabsAction): TabsState {
         return {
           ...existing,
           scopeKey: tab.scopeKey,
+          cwd: tab.cwd,
           label: tab.label,
           shellTitle: tab.shellTitle,
           customTitle: tab.customTitle ?? null,

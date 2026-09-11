@@ -238,3 +238,12 @@ describe("shell titles", () => {
     expect(tabName(state.tabs[0]!)).toBe("Acme");
   });
 });
+
+it("updates a session's working directory even when its title and status are unchanged", () => {
+  const before = synced(emptyTabs, 1, ["a"]);
+  const after = tabsReducer(before, { type: "synced", snapshot: {
+    revision: 2, tabs: [serverTab("a", { cwd: "/tmp/new-directory" })], activeTabId: "a",
+  } });
+  expect(after.tabs[0]?.cwd).toBe("/tmp/new-directory");
+  expect(after.tabs[0]?.status).toBe(before.tabs[0]?.status);
+});

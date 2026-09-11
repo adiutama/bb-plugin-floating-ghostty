@@ -395,16 +395,6 @@
   height: 44px;
   font-size: 14px;
 }
-.bb-fg-switcher select {
-  min-width: 0;
-  max-width: 100%;
-  border: 1px solid var(--border);
-  background: var(--popover);
-  color: var(--popover-foreground);
-  border-radius: 6px;
-  padding: 5px 8px;
-  font: inherit;
-}
 .bb-fg-search-context {
   display: flex;
   align-items: center;
@@ -413,17 +403,45 @@
   color: var(--muted-foreground);
   font-size: 11px;
 }
-.bb-fg-search-context select {
-  margin-left: auto;
-  width: auto;
+.bb-fg-project-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   max-width: 45%;
-  border: 0;
-  padding: 3px 0 3px 6px;
-  background: transparent;
+  min-width: 0;
+  margin-right: 8px;
+  padding: 5px 7px;
+  border-radius: 6px;
   color: var(--muted-foreground);
-  font-size: 11px;
-  text-overflow: ellipsis;
+  font-size: 12px;
 }
+.bb-fg-project-filter > span,
+.bb-fg-new-terminal small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bb-fg-project-filter:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+.bb-fg-project-menu {
+  z-index: 70;
+  width: 280px;
+  max-width: calc(100vw - 32px);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--popover);
+  color: var(--popover-foreground);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.2);
+  overflow: hidden;
+}
+.bb-fg-new-terminal small {
+  margin-left: auto;
+  max-width: 45%;
+  color: var(--muted-foreground);
+}
+
 .bb-fg-session-name {
   flex: 1;
   min-width: 0;
@@ -441,25 +459,6 @@
   font-size: 12px;
   line-height: 16px;
   color: var(--muted-foreground);
-}
-.bb-fg-exit-state {
-  position: absolute;
-  bottom: 12px;
-  left: 50%;
-  transform: translateX(-50%);
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 8px 12px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--card);
-  color: var(--muted-foreground);
-  font-size: 12px;
-}
-.bb-fg-exit-state button {
-  color: var(--foreground);
-  white-space: nowrap;
 }
 .bb-fg-actions-menu {
   z-index: 60;
@@ -560,27 +559,6 @@
   padding: 0 16px 12px;
   color: var(--destructive);
 }
-.bb-fg-owner-choices {
-  padding: 0 6px 6px;
-}
-.bb-fg-owner-choices button {
-  display: flex;
-  gap: 10px;
-  align-items: center;
-  width: 100%;
-  text-align: left;
-  padding: 10px;
-  border-radius: 6px;
-}
-.bb-fg-owner-choices button > span {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.bb-fg-owner-choices small {
-  color: var(--muted-foreground);
-}
 
 /* One quiet surface: the title belongs to the terminal, not a second toolbar. */
 .bb-fg-surface {
@@ -665,18 +643,6 @@
   font-size: 13px;
   color: var(--muted-foreground);
 }
-.bb-fg-search-context button {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 3px 5px;
-  border-radius: 4px;
-  white-space: nowrap;
-  color: var(--foreground);
-}
-.bb-fg-search-context button:disabled {
-  opacity: 0.5;
-}
 .bb-fg-result-count {
   margin-left: 4px;
   font-variant-numeric: tabular-nums;
@@ -710,4 +676,20 @@
 }
 .bb-fg-window[data-layout="sheet"] .bb-fg-thread-search-scrim {
   padding: 8px;
+}
+
+.bb-fg-project-menu [cmdk-list] {
+  max-height: min(
+    20rem,
+    var(--radix-popover-content-available-height, 50dvh) - 48px
+  );
+  padding: 4px;
+}
+.bb-fg-project-menu [cmdk-item] {
+  font-size: 12px;
+}
+.bb-fg-project-menu [cmdk-item] > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

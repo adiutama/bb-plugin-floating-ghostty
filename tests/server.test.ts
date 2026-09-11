@@ -171,7 +171,7 @@ describe("Floating Ghostty backend", () => {
   });
 });
 
-it("resolves context from the thread and offers only Global plus its project and worktrees", async () => {
+it("resolves the thread project and offers every project plus its current launch environment", async () => {
   const { call, harness } = await setup();
   harness.inspection.sdk.stub("projects.list", async () => [
     {
@@ -218,16 +218,20 @@ it("resolves context from the thread and offers only Global plus its project and
   });
   expect(result.scopes.map((scope) => scope.key)).toEqual([
     "project:A",
+    "project:B",
     "home:local",
     "worktree:A:one",
-    "worktree:A:two",
   ]);
-  expect(harness.inspection.sdk.callsTo("environments.get")).toHaveLength(2);
+  expect(harness.inspection.sdk.callsTo("environments.get")).toHaveLength(1);
   const global = (await call("resolveContext", {
     projectId: null,
     threadId: null,
   })) as { scopes: { key: string }[] };
-  expect(global.scopes.map((scope) => scope.key)).toEqual(["home:local"]);
+  expect(global.scopes.map((scope) => scope.key)).toEqual([
+    "project:A",
+    "project:B",
+    "home:local",
+  ]);
 });
 
 it("creates a worktree terminal through its environment identity and rejects a forged project owner", async () => {
@@ -299,7 +303,7 @@ it("keeps native shortcut override off by default and follows BB's configured sh
   expect(await enabled.call("terminalShortcuts", null)).toEqual([]);
 });
 
-it("promotes ownership without replacing the process and preserves its launch context across reload and restart", async () => {
+it("binds worktree shells to their project and preserves launch context across reload and restart", async () => {
   const { call, harness, sessions } = await setup();
   const environment = {
     id: "one",
@@ -315,31 +319,9 @@ it("promotes ownership without replacing the process and preserves its launch co
     cols: 80,
     rows: 24,
   })) as any;
-  const before = ((await call("init", null)) as any).snapshot.tabs[0];
-  const project = (await call("promoteTab", {
-    terminalId: opened.terminalId,
-    target: "project",
-  })) as any;
-  expect(project.snapshot.tabs[0]).toEqual({
-    ...before,
-    scopeKey: "project:A",
-  });
-  const global = (await call("promoteTab", {
-    terminalId: opened.terminalId,
-    target: "global",
-  })) as any;
-  expect(global.snapshot.tabs[0]).toEqual({
-    ...before,
-    scopeKey: "home:local",
-  });
+  expect(opened.scopeKey).toBe("project:A");
   expect(harness.inspection.sdk.callsTo("terminals.create")).toHaveLength(1);
   expect(harness.inspection.sdk.callsTo("terminals.close")).toHaveLength(0);
-  await expect(
-    call("promoteTab", { terminalId: opened.terminalId, target: "project" }),
-  ).rejects.toThrow(/cannot be promoted/);
-  await expect(
-    call("promoteTab", { terminalId: "foreign", target: "global" }),
-  ).rejects.toThrow(/does not belong/);
   const reloaded = await harness.lifecycle.reload(plugin);
   cleanups.push(() => reloaded.harness.lifecycle.dispose());
   const sdk = reloaded.harness.inspection.sdk;
@@ -363,7 +345,7 @@ it("promotes ownership without replacing the process and preserves its launch co
   )) as any;
   expect(afterReload.snapshot.tabs[0]).toMatchObject({
     terminalId: opened.terminalId,
-    scopeKey: "home:local",
+    scopeKey: "project:A",
     cwd: opened.cwd,
     hostName: "Local",
   });
@@ -372,7 +354,7 @@ it("promotes ownership without replacing the process and preserves its launch co
     cols: 80,
     rows: 24,
   })) as any;
-  expect(restarted.scopeKey).toBe("home:local");
+  expect(restarted.scopeKey).toBe("project:A");
   expect(sdk.callsTo("terminals.create")[0]?.[0]).toMatchObject({
     scope: { kind: "environment", environmentId: "one" },
   });
@@ -397,7 +379,32 @@ it("verifies exit after output becomes unavailable without treating a transport 
     status: "exited",
     exitCode: 3,
   });
+  expect(((await call("init", null)) as any).snapshot.tabs).toHaveLength(0);
+});
+
+it("prunes shells that exit while hidden and persists removal while retaining disconnected shells", async () => {
+  const { open, call, harness, sessions } = await setup();
+  const first = await open();
+  const second = await open();
+  sessions.get(first.opened.terminalId)!.status = "exited";
+  harness.inspection.sdk.stub(
+    "terminals.get",
+    async ({ terminalId }: { terminalId: string }) => {
+      if (terminalId === second.opened.terminalId)
+        throw new Error("host disconnected");
+      return sessions.get(terminalId);
+    },
+  );
+  vi.spyOn(Date, "now").mockReturnValue(Date.now() + 5000);
+  const result = (await call("init", null)) as any;
+  expect(result.snapshot.tabs.map((tab: any) => tab.terminalId)).toEqual([
+    second.opened.terminalId,
+  ]);
+  expect(result.snapshot.revision).toBeGreaterThan(second.snapshot.revision);
   expect(((await call("init", null)) as any).snapshot.tabs).toHaveLength(1);
+  await expect(
+    call("setActiveTab", { terminalId: first.opened.terminalId }),
+  ).rejects.toThrow("does not belong");
 });
 
 it("separates pinned names from automatic shell/command titles and persists both across reload", async () => {
@@ -453,15 +460,13 @@ it("separates pinned names from automatic shell/command titles and persists both
   ).rejects.toThrow();
 });
 
-it("narrows ownership to a project or worktree without changing the original restart destination", async () => {
-  const { call, open, harness } = await setup();
-  harness.inspection.sdk.stub("projects.list", async () => [
-    {
-      id: "A",
-      name: "A",
-      sources: [{ hostId: "local", path: "/a", isDefault: true }],
-    },
-  ]);
+it("normalizes legacy worktree owners while retaining their original restart destination", async () => {
+  const { call, open, harness, bb } = await setup();
+  const { opened } = await open();
+  const stored = (await bb.storage.kv.get("open-tabs")) as any[];
+  stored[0].scopeKey = "worktree:A:one";
+  delete stored[0].launchScopeKey;
+  await bb.storage.kv.set("open-tabs", stored);
   harness.inspection.sdk.stub("environments.get", async () => ({
     id: "one",
     projectId: "A",
@@ -470,33 +475,22 @@ it("narrows ownership to a project or worktree without changing the original res
     hostId: "local",
     status: "ready",
   }));
-  const { opened } = await open();
-  let result = (await call("setTabOwner", {
-    terminalId: opened.terminalId,
-    scopeKey: "project:A",
-  })) as any;
+  const now = Date.now();
+  vi.spyOn(Date, "now").mockReturnValue(now + 60_000);
+  const result = (await call("init", null)) as any;
   expect(result.snapshot.tabs[0].scopeKey).toBe("project:A");
-  result = (await call("setTabOwner", {
-    terminalId: opened.terminalId,
-    scopeKey: "worktree:A:one",
-  })) as any;
-  expect(result.snapshot.tabs[0].scopeKey).toBe("worktree:A:one");
-  await expect(
-    call("setTabOwner", {
-      terminalId: opened.terminalId,
-      scopeKey: "worktree:B:one",
-    }),
-  ).rejects.toThrow();
-  expect(harness.inspection.sdk.callsTo("terminals.create")).toHaveLength(1);
+  expect(harness.inspection.sdk.callsTo("terminals.close")).toHaveLength(0);
   const { restarted } = (await call("restartTab", {
     terminalId: opened.terminalId,
     cols: 80,
     rows: 24,
   })) as any;
-  expect(restarted.scopeKey).toBe("worktree:A:one");
+  expect(restarted.scopeKey).toBe("project:A");
   expect(
     harness.inspection.sdk.callsTo("terminals.create")[1]?.[0],
-  ).toMatchObject({ scope: { kind: "host_path", hostId: "local", cwd: null } });
+  ).toMatchObject({
+    scope: { kind: "environment", environmentId: "one" },
+  });
 });
 
 it("retains a live terminal when deletion or restart fails", async () => {
@@ -543,4 +537,29 @@ it("retains metadata on transient inspection errors and only deletes after autho
     ((await call("closeTab", { terminalId: opened.terminalId })) as any)
       .snapshot.tabs,
   ).toEqual([]);
+});
+
+it("updates the displayed working directory without moving project ownership or the restart location", async () => {
+  const { call, open, harness } = await setup();
+  const { opened } = await open();
+  const result = (await call("setTabCwd", {
+    terminalId: opened.terminalId,
+    cwd: "/tmp/changed",
+  })) as any;
+  expect(result.snapshot.tabs[0]).toMatchObject({
+    cwd: "/tmp/changed",
+    scopeKey: "home:local",
+  });
+  const { restarted } = (await call("restartTab", {
+    terminalId: opened.terminalId,
+    cols: 80,
+    rows: 24,
+  })) as any;
+  expect(restarted.cwd).not.toBe("/tmp/changed");
+  expect(
+    harness.inspection.sdk.callsTo("terminals.create")[1]?.[0],
+  ).toMatchObject({ scope: { kind: "host_path", cwd: null } });
+  await expect(
+    call("setTabCwd", { terminalId: restarted.terminalId, cwd: "relative" }),
+  ).rejects.toThrow();
 });

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Command, CommandInput, CommandItem, CommandList } from "./ui/command";
 import { defaultFilter, useCommandState } from "cmdk";
 import { containTab, isolateTerminalKey } from "../lib/keyboard";
+import { ProjectFilter } from "./project-filter";
 import type { ManagementMode } from "./terminal-management";
 import {
   DropdownMenu,
@@ -15,6 +16,7 @@ import {
   scopeLabel,
   ownerOf,
   readSelection,
+  contextKey,
   type TerminalContext,
 } from "../lib/context";
 import type { ScopeOption } from "../lib/scopes";
@@ -29,7 +31,6 @@ export function TerminalSwitcher({
   onDismiss,
   visible,
   busy,
-  creationLabel,
   onCreate,
   onManage,
   onRestart,
@@ -44,14 +45,46 @@ export function TerminalSwitcher({
   onDismiss: () => void;
   visible: boolean;
   busy: boolean;
-  creationLabel: string;
-  onCreate: () => void;
+  onCreate: (projectId: string | null) => void;
   onManage: (id: string, mode: ManagementMode) => void;
   onRestart: (id: string) => void;
   onFind?: () => void;
   maximize: { on: boolean; toggle: () => void } | null;
 }) {
-  const [filter, setFilter] = useState("default");
+  const [filter, setFilter] = useState(() => contextKey(context));
+  const [filterOpen, setFilterOpen] = useState(false);
+  const projects = new Map(
+    scopes
+      .filter((scope) => scope.kind === "project")
+      .map((scope) => [scope.key, scope.label]),
+  );
+  // Keep orphaned projects discoverable while their sessions still exist.
+  for (const tab of tabs) {
+    const projectId = ownerOf(tab.scopeKey).projectId;
+    if (projectId !== null && !projects.has(`project:${projectId}`))
+      projects.set(`project:${projectId}`, "Project unavailable");
+  }
+  const filters = [
+    { key: "all", label: "All" },
+    { key: "no-project", label: "No project" },
+    ...Array.from(projects, ([key, label]) => ({ key, label })),
+  ];
+  const creationProject =
+    filter === "all"
+      ? context.projectId
+      : filter === "no-project"
+        ? null
+        : ownerOf(filter).projectId;
+  const creationLabel =
+    creationProject === null
+      ? "No project"
+      : (projects.get(`project:${creationProject}`) ?? "Project unavailable");
+  useEffect(() => {
+    setFilter(contextKey(context));
+  }, [context.projectId]);
+  useEffect(() => {
+    if (!visible) setFilterOpen(false);
+  }, [visible]);
   const [query, setQuery] = useState("");
   const [highlighted, setHighlighted] = useState(activeId ?? "");
   const input = useRef<HTMLInputElement>(null);
@@ -68,10 +101,10 @@ export function TerminalSwitcher({
   const shown = tabs
     .filter(
       (tab) =>
-        filter === "default" ||
-        (filter === "global"
-          ? ownerOf(tab.scopeKey).kind === "home"
-          : tab.scopeKey === filter),
+        filter === "all" ||
+        (filter === "no-project"
+          ? ownerOf(tab.scopeKey).projectId === null
+          : `project:${ownerOf(tab.scopeKey).projectId}` === filter),
     )
     .map((tab) => ({
       tab,
@@ -92,8 +125,9 @@ export function TerminalSwitcher({
     );
   useEffect(() => {
     const ids = shown.map(({ tab }) => tab.terminalId);
+    if (!query.trim() && !busy) ids.push("new-terminal");
     if (!ids.includes(highlighted)) setHighlighted(ids[0] ?? "");
-  }, [shown, highlighted]);
+  }, [shown, highlighted, query, busy]);
   return (
     <div
       className="bb-fg-switcher-scrim bb-fg-thread-search-scrim"
@@ -106,6 +140,21 @@ export function TerminalSwitcher({
         role="dialog"
         aria-label="Switch terminal"
         onPointerDown={(event) => event.stopPropagation()}
+        onKeyDownCapture={(event) => {
+          if (!event.currentTarget.contains(event.target as Node)) return;
+          if (
+            (event.metaKey || event.ctrlKey) &&
+            !event.altKey &&
+            !event.shiftKey &&
+            event.key.toLowerCase() === "p" &&
+            !event.nativeEvent.isComposing
+          ) {
+            event.preventDefault();
+            event.stopPropagation();
+            setFilterOpen((open) => !open);
+            return;
+          }
+        }}
         onKeyDown={(event) => {
           // Portaled menus own their Escape and arrow keys.
           if (!event.currentTarget.contains(event.target as Node)) return;
@@ -132,68 +181,29 @@ export function TerminalSwitcher({
               aria-label="Search terminals"
               placeholder="Search terminals"
             />
+            <ProjectFilter
+              open={filterOpen}
+              onOpenChange={setFilterOpen}
+              value={filter}
+              options={filters}
+              onChange={setFilter}
+              onClose={() => {
+                if (input.current?.closest("[hidden], [inert]") == null)
+                  input.current?.focus();
+              }}
+            />
           </div>
           <div className="bb-fg-search-context">
             <span>
               Terminals{" "}
               <span className="bb-fg-result-count">{shown.length}</span>
             </span>
-            <select
-              aria-label="Filter terminals"
-              title="Category (Tab to focus)"
-              aria-keyshortcuts="Tab"
-              value={filter}
-              onChange={(event) => setFilter(event.target.value)}
-              onKeyDown={(event) => {
-                // Arrow/Enter belong to the select while it has focus, not cmdk.
-                if (
-                  [
-                    "ArrowUp",
-                    "ArrowDown",
-                    "ArrowLeft",
-                    "ArrowRight",
-                    "Enter",
-                    " ",
-                  ].includes(event.key)
-                ) {
-                  // Keep cmdk from choosing a terminal while navigating categories.
-                  event.stopPropagation();
-                }
-              }}
-            >
-              <option value="default">All</option>
-              <option value="global">Global</option>
-              {scopes
-                .filter((scope) => scope.kind !== "home")
-                .map((scope) => (
-                  <option key={scope.key} value={scope.key}>
-                    {scope.label}
-                    {ownerOf(scope.key).environmentId ===
-                      context.environmentId && scope.kind === "worktree"
-                      ? " · Current"
-                      : ""}
-                  </option>
-                ))}
-            </select>
-            <button
-              type="button"
-              onClick={onCreate}
-              disabled={busy}
-              title={`New terminal in ${creationLabel}`}
-              aria-label="New terminal"
-              onKeyDown={(event) => {
-                if (event.key !== "Tab") isolateTerminalKey(event);
-              }}
-            >
-              <Icon name="Plus" className="size-3.5" />{" "}
-              {busy ? "Starting…" : "New"}
-            </button>
           </div>
           <CommandList aria-label="Terminals">
             {shown.length === 0 ? (
               <div className="bb-fg-search-empty" role="status">
                 <Icon name="Search" className="size-4" />
-                {tabs.length === 0 ? "No terminals yet" : "No matches"}
+                {query.trim() ? "No matches" : "No terminals here yet"}
               </div>
             ) : null}
             {shown.map(({ tab }) => (
@@ -212,6 +222,21 @@ export function TerminalSwitcher({
                 maximize={maximize}
               />
             ))}
+            {!query.trim() ? (
+              <CommandItem
+                value="new-terminal"
+                aria-label="New terminal"
+                className="bb-fg-new-terminal"
+                disabled={busy}
+                onSelect={() => {
+                  if (!busy) onCreate(creationProject);
+                }}
+              >
+                <Icon name="Plus" className="size-4" />
+                <span>{busy ? "Starting…" : "New terminal"}</span>
+                <small title={creationLabel}>{creationLabel}</small>
+              </CommandItem>
+            ) : null}
           </CommandList>
         </Command>
       </section>
@@ -256,7 +281,7 @@ function SessionRow({
   return (
     <div className="bb-fg-session-row" data-highlighted={highlighted}>
       <CommandItem
-        aria-label={`${tabName(tab)} · ${owner} · ${tab.hostName}${active ? " · Current terminal" : ""}${tab.status === "exited" ? " · Exited" : tab.status === "error" ? " · Error" : ""}`}
+        aria-label={`${tabName(tab)} · ${tab.cwd || "Directory unavailable"} · ${owner} · ${tab.hostName}${active ? " · Current terminal" : ""}${tab.status === "exited" ? " · Exited" : tab.status === "error" ? " · Error" : ""}`}
         value={tab.terminalId}
         keywords={[
           tabName(tab),
@@ -273,12 +298,10 @@ function SessionRow({
           </span>
           <span
             className="bb-fg-session-scope"
-            title={`${owner} · ${tab.hostName}`}
+            title={tab.cwd || "Directory unavailable"}
           >
             <Icon name="Folder" className="size-3.5 shrink-0" />
-            <span>
-              {owner} · {tab.hostName}
-            </span>
+            <span>{tab.cwd || "Directory unavailable"}</span>
           </span>
         </span>
         {tab.status === "exited" || tab.status === "error" ? (
@@ -335,11 +358,6 @@ function SessionRow({
           {onFind || maximize ? <DropdownMenuSeparator /> : null}
           <DropdownMenuItem onSelect={() => onManage(tab.terminalId, "rename")}>
             Rename…
-          </DropdownMenuItem>
-          <DropdownMenuItem
-            onSelect={() => onManage(tab.terminalId, "ownership")}
-          >
-            Change ownership…
           </DropdownMenuItem>
           <DropdownMenuSeparator />
           <DropdownMenuItem onSelect={() => onRestart(tab.terminalId)}>

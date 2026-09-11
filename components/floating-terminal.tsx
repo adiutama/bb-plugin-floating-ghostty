@@ -21,9 +21,9 @@ import type { ScopeOption } from "@/lib/scopes";
 import { FindBar } from "@/components/find-bar";
 import { KeyToolbar } from "@/components/key-toolbar";
 import {
-  availableHere,
   contextKey,
   globalContext,
+  ownerOf,
   preferredScope,
   preferredTerminal,
   readSelection,
@@ -236,6 +236,15 @@ export function FloatingTerminal({
   // size, and briefly mis-wraps until the first resize lands.
   const activeIdRef = useRef<string | null>(null);
   activeIdRef.current = activeId;
+  // Keep the selected shell's owner through the snapshot that removes it.
+  const activeOwnerRef = useRef<TerminalContext>(globalContext);
+  const selectedShell = state.tabs.find((tab) => tab.terminalId === activeId);
+  if (selectedShell) {
+    activeOwnerRef.current = {
+      ...globalContext,
+      projectId: ownerOf(selectedShell.scopeKey).projectId,
+    };
+  }
 
   const geometry = useCallback(() => {
     const activeId = activeIdRef.current;
@@ -319,8 +328,7 @@ export function FloatingTerminal({
 
   const openTab = useCallback(
     async (scopeKey: string) => {
-      if (creatingRef.current || !availableHere(scopeKey, contextRef.current))
-        return;
+      if (creatingRef.current) return;
       creatingRef.current = true;
       const version = requestVersion.current;
       const context = contextRef.current;
@@ -353,9 +361,13 @@ export function FloatingTerminal({
     [rpc, geometry],
   );
 
-  const createInContext = () => {
+  const createInContext = (projectId = contextRef.current.projectId) => {
     if (loading || resolvedRoute !== routeKey) return;
-    const scope = preferredScope(scopes, contextRef.current);
+    const creationContext =
+      projectId === contextRef.current.projectId
+        ? contextRef.current
+        : { projectId, environmentId: null, hostId: null };
+    const scope = preferredScope(scopes, creationContext);
     if (!scope?.online) {
       toast.error(
         scope
@@ -373,14 +385,6 @@ export function FloatingTerminal({
     const result = await rpc.call("setTabName", {
       terminalId: managedId,
       name,
-    });
-    dispatch({ type: "synced", snapshot: result.snapshot });
-  };
-  const changeOwner = async (scopeKey: string) => {
-    if (!managedId) return;
-    const result = await rpc.call("setTabOwner", {
-      terminalId: managedId,
-      scopeKey,
     });
     dispatch({ type: "synced", snapshot: result.snapshot });
   };
@@ -457,7 +461,7 @@ export function FloatingTerminal({
   const selectTab = useCallback(
     (terminalId: string) => {
       const tab = state.tabs.find((tab) => tab.terminalId === terminalId);
-      if (!tab || !availableHere(tab.scopeKey, contextRef.current)) return;
+      if (!tab) return;
       setActiveId(terminalId);
       rememberSelection(contextRef.current, terminalId);
       setMode("shell");
@@ -684,6 +688,7 @@ export function FloatingTerminal({
       if (
         foreignDialog &&
         !rootRef.current?.contains(foreignDialog) &&
+        !foreignDialog.matches(".bb-fg-project-menu") &&
         !foreignDialog.querySelector(".bb-fg-actions-menu")
       )
         return;
@@ -721,11 +726,50 @@ export function FloatingTerminal({
 
   // --------------------------------------------------------------- render
 
+  const exitRefresh = useRef<Promise<void> | null>(null);
+  const exitRefreshNeeded = useRef(false);
+  const onExit = useCallback(() => {
+    exitRefreshNeeded.current = true;
+    if (exitRefresh.current) return;
+    const version = requestVersion.current;
+    exitRefresh.current = (async () => {
+      do {
+        exitRefreshNeeded.current = false;
+        const result = await rpc.call("init");
+        dispatch({ type: "synced", snapshot: result.snapshot });
+        if (version !== requestVersion.current) return;
+        if (
+          result.snapshot.tabs.some(
+            (tab) => tab.terminalId === activeIdRef.current,
+          )
+        )
+          continue;
+        const next = preferredTerminal(
+          result.snapshot.tabs,
+          activeOwnerRef.current,
+          undefined,
+          readSelection().recent,
+        );
+        setActiveId(next?.terminalId ?? null);
+        setFindOpen(false);
+        if (next) rememberSelection(contextRef.current, next.terminalId);
+        else windowController.hide();
+      } while (exitRefreshNeeded.current);
+    })()
+      .catch(() => {
+        toast.error("Could not refresh the terminal list.");
+      })
+      .finally(() => {
+        exitRefresh.current = null;
+      });
+  }, [rpc]);
+
   const onStatus = useCallback(
     (terminalId: string, status: TabStatus, detail: string | null) => {
       dispatch({ type: "status", terminalId, status, detail });
+      if (status === "exited") onExit();
     },
-    [],
+    [onExit],
   );
 
   const onPumpReady = useCallback((terminalId: string, pump: TerminalPump) => {
@@ -735,11 +779,6 @@ export function FloatingTerminal({
   const onPumpGone = useCallback((terminalId: string) => {
     pumps.current.delete(terminalId);
   }, []);
-
-  const onRequestRestart = useCallback(
-    (terminalId: string) => void restartTab(terminalId),
-    [restartTab],
-  );
 
   // A shell that sets its title on every prompt would otherwise put a rename
   // round trip behind every command, so coalesce and drop no-ops. Keyed by
@@ -766,6 +805,33 @@ export function FloatingTerminal({
               // Allow a later signal to retry after a transient transport error.
               if (lastTitles.current.get(terminalId) === title)
                 lastTitles.current.delete(terminalId);
+            });
+        }, TITLE_RENAME_DEBOUNCE_MS),
+      );
+    },
+    [rpc],
+  );
+
+  const lastDirectories = useRef(new Map<string, string>());
+  const onCwd = useCallback(
+    (terminalId: string, cwd: string) => {
+      if (lastDirectories.current.get(terminalId) === cwd) return;
+      lastDirectories.current.set(terminalId, cwd);
+      const key = `cwd:${terminalId}`;
+      const pending = titleTimers.current.get(key);
+      if (pending !== undefined) clearTimeout(pending);
+      titleTimers.current.set(
+        key,
+        window.setTimeout(() => {
+          titleTimers.current.delete(key);
+          void rpc
+            .call("setTabCwd", { terminalId, cwd })
+            .then((result) =>
+              dispatch({ type: "synced", snapshot: result.snapshot }),
+            )
+            .catch(() => {
+              if (lastDirectories.current.get(terminalId) === cwd)
+                lastDirectories.current.delete(terminalId);
             });
         }, TITLE_RENAME_DEBOUNCE_MS),
       );
@@ -907,10 +973,7 @@ export function FloatingTerminal({
 
   const onCtrlArmed = useCallback((armed: boolean) => setCtrlArmed(armed), []);
 
-  const availableTabs =
-    resolvedRoute === routeKey
-      ? state.tabs.filter((tab) => availableHere(tab.scopeKey, terminalContext))
-      : [];
+  const availableTabs = resolvedRoute === routeKey ? state.tabs : [];
   const activeTab =
     availableTabs.find((tab) => tab.terminalId === activeId) ?? null;
   useSwitcherTitles(
@@ -920,6 +983,8 @@ export function FloatingTerminal({
       .map((tab) => tab.terminalId),
     open && !loading && mode === "switch",
     onTitle,
+    onCwd,
+    onExit,
   );
   const visited = useRef(new Set<string>());
   if (activeTab && !loading) visited.current.add(activeTab.terminalId);
@@ -1005,11 +1070,11 @@ export function FloatingTerminal({
                 fitVersion={fitVersion}
                 onStatus={onStatus}
                 onTitle={onTitle}
+                onCwd={onCwd}
                 onCtrlArmed={onCtrlArmed}
                 onFindRequested={openFind}
                 onScrollState={onScrollState}
                 onSearchResults={onSearchResults}
-                onRequestRestart={onRequestRestart}
                 onToggleRequested={hide}
                 onPumpReady={onPumpReady}
                 onPumpGone={onPumpGone}
@@ -1062,28 +1127,17 @@ export function FloatingTerminal({
           {!loading && !loadError && !activeTab ? (
             <div className="bb-fg-state">
               <p>No terminal selected.</p>
-              <button onClick={createInContext} disabled={creating}>
+              <button onClick={() => createInContext()} disabled={creating}>
                 Start a shell
               </button>
             </div>
           ) : null}
-          {mode === "shell" && activeTab?.status === "exited" ? (
-            <div className="bb-fg-exit-state" role="status">
-              {activeTab.statusDetail ?? "Shell exited"}
-              <button onClick={() => void restartTab(activeTab.terminalId)}>
-                Restart shell
-              </button>
-            </div>
-          ) : null}
-          {(mode === "rename" || mode === "ownership" || mode === "delete") &&
-          managedTab ? (
+          {(mode === "rename" || mode === "delete") && managedTab ? (
             <TerminalManagement
               key={`${mode}:${managedTab.terminalId}`}
               mode={mode}
               tab={managedTab}
-              scopes={scopes}
               onName={changeName}
-              onOwner={changeOwner}
               onDelete={() => closeTab(managedTab.terminalId)}
               onDismiss={dismissManagement}
             />
@@ -1096,10 +1150,6 @@ export function FloatingTerminal({
               activeId={activeId}
               visible={mode === "switch"}
               busy={loading || creating}
-              creationLabel={
-                preferredScope(scopes, terminalContext)?.label ??
-                "current context"
-              }
               onCreate={createInContext}
               onManage={(id, nextMode) => {
                 setManagedId(id);

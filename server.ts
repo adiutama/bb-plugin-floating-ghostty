@@ -3,7 +3,7 @@ import { createRequire } from "node:module";
 // bb-plugin-floating-ghostty — backend.
 //
 // Persistent terminal inventory in front of `bb.sdk.terminals`. Each record maps
-// to one real PTY and retains Global, Project, or Worktree ownership. The open-tab list and the active tab are kv-persisted, so closing the
+// to one real PTY and belongs to a project or no project. The open-tab list and the active tab are kv-persisted, so closing the
 // window, reloading the app, or restarting bb reattaches every surviving shell
 // instead of losing them.
 //
@@ -21,7 +21,7 @@ import { createRequire } from "node:module";
 //     applied, so a slow `init` can never resurrect a closed tab or drop a
 //     freshly opened one just because it started earlier.
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
-import { availableHere, ownerOf } from "./lib/context";
+import { ownerOf, projectScopeKey } from "./lib/context";
 import { SHELL_START_COMMAND } from "./lib/shell-integration";
 import { BB_TERMINAL_FONT_SIZE } from "./lib/theme";
 import {
@@ -122,22 +122,24 @@ export const rpcContract = defineRpcContract({
       .strict(),
     output: z.object({ snapshot: snapshotSchema, opened: tabSchema }),
   },
+  setTabCwd: {
+    input: z
+      .object({
+        terminalId: z.string(),
+        cwd: z
+          .string()
+          .max(4096)
+          .regex(/^\/[^\x00-\x1f\x7f]*$/),
+      })
+      .strict(),
+    output: z.object({ snapshot: snapshotSchema }),
+  },
   setTabName: {
     input: z
       .object({
         terminalId: z.string(),
         name: z.string().trim().max(80).nullable(),
       })
-      .strict(),
-    output: z.object({ snapshot: snapshotSchema }),
-  },
-  setTabOwner: {
-    input: z.object({ terminalId: z.string(), scopeKey: z.string() }).strict(),
-    output: z.object({ snapshot: snapshotSchema }),
-  },
-  promoteTab: {
-    input: z
-      .object({ terminalId: z.string(), target: z.enum(["project", "global"]) })
       .strict(),
     output: z.object({ snapshot: snapshotSchema }),
   },
@@ -225,6 +227,7 @@ interface StoredTab {
   name?: string | null;
   shellName?: string;
   autoTitle?: string | null;
+  cwd?: string;
 }
 
 /**
@@ -434,10 +437,18 @@ export default async function plugin(bb: BbPluginApi) {
           name: z.string().nullable().optional(),
           shellName: z.string().optional(),
           autoTitle: z.string().nullable().optional(),
+          cwd: z.string().optional(),
         }),
       )
       .safeParse(await bb.storage.kv.get(TABS_KEY));
-    return result.success ? result.data : [];
+    // Normalize old worktree owners without losing the original restart location.
+    return result.success
+      ? result.data.map((entry) => ({
+          ...entry,
+          launchScopeKey: entry.launchScopeKey ?? entry.scopeKey,
+          scopeKey: projectScopeKey(entry.scopeKey),
+        }))
+      : [];
   }
 
   async function requireOwnedTab(terminalId: string): Promise<void> {
@@ -595,7 +606,6 @@ export default async function plugin(bb: BbPluginApi) {
       bb.storage.kv.get<string>(ACTIVE_TAB_KEY),
     ]);
 
-    let sawTimeout = false;
     // One parallel, timeout-guarded round instead of a sequential get per tab:
     // the old loop held the handler for (tab count × round trip) — seconds
     // against a slow remote host — and everything queued behind it.
@@ -608,7 +618,10 @@ export default async function plugin(bb: BbPluginApi) {
             "terminals.get",
           );
           rememberStatus(session.id, session.status, session.exitCode);
-          // Keep exited shells reviewable/restartable until explicitly ended.
+          if (session.status === "exited") {
+            forgetTab(entry.terminalId);
+            return null;
+          }
           const scope =
             scopes.find(
               (item) => item.key === (entry.launchScopeKey ?? entry.scopeKey),
@@ -627,7 +640,7 @@ export default async function plugin(bb: BbPluginApi) {
             scopeKey: entry.scopeKey,
             label,
             hostName,
-            cwd: session.initialCwd,
+            cwd: entry.cwd ?? session.initialCwd,
             status: session.status,
             exitCode: session.exitCode,
             customTitle: entry.name ?? null,
@@ -640,7 +653,7 @@ export default async function plugin(bb: BbPluginApi) {
                       scope?.label ?? labelFromCwd(session.initialCwd),
                       hostName,
                     ),
-                    cwd: session.initialCwd,
+                    cwd: entry.cwd ?? session.initialCwd,
                   }),
           };
           lastKnownTabs.set(tab.terminalId, tab);
@@ -650,7 +663,6 @@ export default async function plugin(bb: BbPluginApi) {
             forgetTab(entry.terminalId);
             return null;
           }
-          sawTimeout = true;
           return (
             lastKnownTabs.get(entry.terminalId) ?? {
               terminalId: entry.terminalId,
@@ -659,7 +671,7 @@ export default async function plugin(bb: BbPluginApi) {
               hostName:
                 scopes.find((scope) => scope.hostId === entry.hostId)
                   ?.hostName ?? "",
-              cwd: "",
+              cwd: entry.cwd ?? "",
               status: "disconnected",
               exitCode: null,
               shellTitle: entry.autoTitle ?? null,
@@ -672,7 +684,7 @@ export default async function plugin(bb: BbPluginApi) {
     const tabs: Tab[] = resolved.filter((tab): tab is Tab => tab !== null);
 
     let revision = (await bb.storage.kv.get<number>(REVISION_KEY)) ?? 0;
-    if (tabs.length !== stored.length && !sawTimeout) {
+    if (tabs.length !== stored.length) {
       // Pruning is itself a change, so it earns a new revision.
       await bb.storage.kv.set(
         TABS_KEY,
@@ -769,7 +781,7 @@ export default async function plugin(bb: BbPluginApi) {
     bb.log.info(`opened ${created.id} in ${created.initialCwd}`);
     return {
       terminalId: created.id,
-      scopeKey: scope.key,
+      scopeKey: projectScopeKey(scope.key),
       label: "Shell",
       hostName: scope.hostName,
       cwd: created.initialCwd,
@@ -793,46 +805,15 @@ export default async function plugin(bb: BbPluginApi) {
         environmentId = thread.environmentId;
       }
       const scopes = await listScopes();
-      // Personal/projectless conversations use Global shells.
+      // Projectless conversations use machine-home shells.
       if (!scopes.some((scope) => scope.key === `project:${projectId}`)) {
         projectId = null;
         environmentId = null;
       }
-      const environmentIds = new Set<string>();
-      if (environmentId !== null) environmentIds.add(environmentId);
-      if (projectId !== null) {
-        // Include surviving sessions even if their originating thread was archived.
-        for (const tab of await readStoredTabs()) {
-          const owner = ownerOf(tab.scopeKey);
-          if (owner.projectId === projectId && owner.environmentId)
-            environmentIds.add(owner.environmentId);
-        }
-        // The public SDK exposes environments through threads, not a global environment list.
-        for (let offset = 0; ; offset += 100) {
-          const threads = await withTimeout(
-            bb.sdk.threads.list({
-              projectId,
-              includeHidden: true,
-              limit: 100,
-              offset,
-            }),
-            SDK_TIMEOUT_MS,
-            "threads.list",
-          );
-          for (const thread of threads)
-            if (thread.environmentId) environmentIds.add(thread.environmentId);
-          if (threads.length < 100) break;
-        }
-      }
-      const resolved = await Promise.allSettled(
-        [...environmentIds].map((id) => worktreeScope(projectId!, id)),
-      );
-      const worktrees = resolved.flatMap((result) =>
-        result.status === "fulfilled" ? [result.value] : [],
-      );
-      const current = worktrees.find(
-        (scope) => ownerOf(scope.key).environmentId === environmentId,
-      );
+      const current =
+        projectId !== null && environmentId !== null
+          ? await worktreeScope(projectId, environmentId).catch(() => undefined)
+          : undefined;
       if (environmentId !== null && !current)
         throw new Error(
           "The current worktree is unavailable. Try again when it reconnects.",
@@ -847,15 +828,13 @@ export default async function plugin(bb: BbPluginApi) {
       };
       return {
         context,
-        scopes: [
-          ...scopes.filter((scope) => availableHere(scope.key, context)),
-          ...worktrees,
-        ],
+        scopes: [...scopes, ...(current ? [current] : [])],
       };
     },
 
     async terminalShortcuts() {
-      if (!(await settings.get()).overrideNativeShortcut) return [];
+      const values = await settings.get();
+      if (!values.overrideNativeShortcut) return [];
       const config = await withTimeout(
         bb.sdk.system.config(),
         SDK_TIMEOUT_MS,
@@ -915,6 +894,22 @@ export default async function plugin(bb: BbPluginApi) {
       });
     },
 
+    async setTabCwd({ terminalId, cwd }) {
+      return serialize(async () => {
+        const stored = await readStoredTabs();
+        const entry = stored.find((tab) => tab.terminalId === terminalId);
+        if (!entry)
+          throw new Error("That terminal does not belong to Floating Ghostty.");
+        if (entry.cwd === cwd) return { snapshot: await snapshot() };
+        entry.cwd = cwd;
+        await bb.storage.kv.set(TABS_KEY, stored);
+        const known = lastKnownTabs.get(terminalId);
+        if (known) lastKnownTabs.set(terminalId, { ...known, cwd });
+        await bumpRevision();
+        return { snapshot: await snapshot() };
+      });
+    },
+
     async setTabName({ terminalId, name }) {
       const clean = name?.replace(/[\x00-\x1f\x7f]/g, "").trim() || null;
       const result = await serialize(async () => {
@@ -931,74 +926,6 @@ export default async function plugin(bb: BbPluginApi) {
         return { snapshot: await snapshot() };
       });
       return result;
-    },
-
-    async setTabOwner({ terminalId, scopeKey }) {
-      await requireOwnedTab(terminalId);
-      // Ownership changes do not require moving or reconnecting the process.
-      if (scopeKey !== "global") {
-        const owner = ownerOf(scopeKey);
-        const valid =
-          owner.kind === "worktree" && owner.projectId && owner.environmentId
-            ? await worktreeScope(owner.projectId, owner.environmentId)
-            : (await listScopes()).find(
-                (scope) => scope.kind === "project" && scope.key === scopeKey,
-              );
-        if (!valid) throw new Error("That owner is no longer available.");
-      }
-      const initial = (await readStoredTabs()).find(
-        (entry) => entry.terminalId === terminalId,
-      );
-      if (!initial) throw new Error("That tab is no longer open.");
-      const launchScopeKey = initial.launchScopeKey ?? initial.scopeKey;
-      const hostId =
-        initial.hostId ?? (await bb.sdk.terminals.get({ terminalId })).hostId;
-      return serialize(async () => {
-        const stored = await readStoredTabs();
-        const entry = stored.find((item) => item.terminalId === terminalId);
-        if (!entry) throw new Error("That tab is no longer open.");
-        entry.launchScopeKey = launchScopeKey;
-        entry.hostId = hostId;
-        entry.scopeKey = scopeKey === "global" ? `home:${hostId}` : scopeKey;
-        await bb.storage.kv.set(TABS_KEY, stored);
-        const known = lastKnownTabs.get(terminalId);
-        if (known)
-          lastKnownTabs.set(terminalId, { ...known, scopeKey: entry.scopeKey });
-        await bumpRevision();
-        return { snapshot: await snapshot() };
-      });
-    },
-
-    async promoteTab({ terminalId, target }) {
-      const initial = (await readStoredTabs()).find(
-        (entry) => entry.terminalId === terminalId,
-      );
-      if (!initial)
-        throw new Error("That terminal does not belong to Floating Ghostty.");
-      // Legacy records acquire their execution identity on first promotion.
-      const launchScopeKey = initial.launchScopeKey ?? initial.scopeKey;
-      const hostId =
-        initial.hostId ?? (await requireScope(launchScopeKey)).hostId;
-      return serialize(async () => {
-        const stored = await readStoredTabs();
-        const entry = stored.find((entry) => entry.terminalId === terminalId);
-        if (!entry) throw new Error("That tab is no longer open.");
-        const owner = ownerOf(entry.scopeKey);
-        if (target === "project" && !owner.projectId) {
-          throw new Error("A Global terminal cannot be promoted to a project.");
-        }
-        const scopeKey =
-          target === "global" ? `home:${hostId}` : `project:${owner.projectId}`;
-        if (scopeKey === entry.scopeKey) return { snapshot: await snapshot() };
-        entry.launchScopeKey = launchScopeKey;
-        entry.hostId = hostId;
-        entry.scopeKey = scopeKey;
-        await bb.storage.kv.set(TABS_KEY, stored);
-        const known = lastKnownTabs.get(terminalId);
-        if (known) lastKnownTabs.set(terminalId, { ...known, scopeKey });
-        await bumpRevision();
-        return { snapshot: await snapshot() };
-      });
     },
 
     async closeTab({ terminalId }) {
@@ -1102,7 +1029,7 @@ export default async function plugin(bb: BbPluginApi) {
           throw new Error("That tab is no longer open.");
         }
         // Replace in place so the tab keeps its position in the strip.
-        // Promotion may have completed while the replacement PTY was starting.
+        // Preserve the project and custom name while replacing the PTY.
         restarted.scopeKey = stored[index]!.scopeKey;
         restarted.customTitle = stored[index]!.name ?? null;
         restarted.label = stored[index]!.shellName ?? "Shell";
@@ -1110,6 +1037,7 @@ export default async function plugin(bb: BbPluginApi) {
           ...stored[index]!,
           terminalId: restarted.terminalId,
           autoTitle: null,
+          cwd: restarted.cwd,
         };
         await bb.storage.kv.set(TABS_KEY, stored);
         const storedActive = await bb.storage.kv.get<string>(ACTIVE_TAB_KEY);
@@ -1163,7 +1091,7 @@ export default async function plugin(bb: BbPluginApi) {
         );
         rememberStatus(terminalId, session.status, session.exitCode);
         if (!isLiveStatus(session.status)) {
-          // The next snapshot refreshes the exited state for restart/delete.
+          // The next snapshot removes the exited shell from the inventory.
           lastVerifiedAt = 0;
         }
         return {
@@ -1184,7 +1112,7 @@ export default async function plugin(bb: BbPluginApi) {
           };
         }
         // BB rejects output reads after process exit. Verify the lifecycle state
-        // so Enter-to-restart still works, without calling a network error death.
+        // so the UI can remove it, without calling a network error death.
         try {
           const session = await withTimeout(
             bb.sdk.terminals.get({ terminalId }),

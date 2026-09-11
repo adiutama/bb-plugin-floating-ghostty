@@ -28,6 +28,7 @@ export interface TerminalViewProps {
   ) => void;
   /** A normalised OSC title from the shell, or null when it has none. */
   onTitle: (terminalId: string, title: string | null) => void;
+  onCwd: (terminalId: string, cwd: string) => void;
   /** The on-screen bar's Ctrl latch changed inside this tab's terminal. */
   onCtrlArmed: (armed: boolean) => void;
   /** Cmd/Ctrl+F landed inside this terminal. */
@@ -39,7 +40,6 @@ export interface TerminalViewProps {
     terminalId: string,
     results: { index: number; count: number } | null,
   ) => void;
-  onRequestRestart: (terminalId: string) => void;
   onToggleRequested: () => void;
   onPumpReady: (terminalId: string, pump: TerminalPump) => void;
   onPumpGone: (terminalId: string) => void;
@@ -55,11 +55,11 @@ export function TerminalView({
   fitVersion,
   onStatus,
   onTitle,
+  onCwd,
   onCtrlArmed,
   onFindRequested,
   onScrollState,
   onSearchResults,
-  onRequestRestart,
   onToggleRequested,
   onPumpReady,
   onPumpGone,
@@ -72,21 +72,21 @@ export function TerminalView({
   const handlersRef = useRef({
     onStatus,
     onTitle,
+    onCwd,
     onCtrlArmed,
     onFindRequested,
     onScrollState,
     onSearchResults,
-    onRequestRestart,
     onToggleRequested,
   });
   handlersRef.current = {
     onStatus,
     onTitle,
+    onCwd,
     onCtrlArmed,
     onFindRequested,
     onScrollState,
     onSearchResults,
-    onRequestRestart,
     onToggleRequested,
   };
 
@@ -102,13 +102,13 @@ export function TerminalView({
       onStatus: (status, detail) =>
         handlersRef.current.onStatus(terminalId, status, detail),
       onTitle: (title) => handlersRef.current.onTitle(terminalId, title),
+      onCwd: (cwd) => handlersRef.current.onCwd(terminalId, cwd),
       onCtrlArmed: (armed) => handlersRef.current.onCtrlArmed(armed),
       onFindRequested: () => handlersRef.current.onFindRequested(),
       onScrollState: (bottom) =>
         handlersRef.current.onScrollState(terminalId, bottom),
       onSearchResults: (results) =>
         handlersRef.current.onSearchResults(terminalId, results),
-      onRequestRestart: () => handlersRef.current.onRequestRestart(terminalId),
       onToggleRequested: () => handlersRef.current.onToggleRequested(),
     });
     pumpRef.current = pump;

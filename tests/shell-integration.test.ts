@@ -103,6 +103,7 @@ for (const shell of ["zsh", "bash", "fish"]) {
         const titles = [
           ...output.matchAll(/\x1b\][02];([^\x07\x1b]*)(?:\x07|\x1b\\)/g),
         ].map((match) => match[1]);
+        expect(output).toContain("1337;CurrentDir=/");
         expect(titles).toContain(`bb-fg:shell:${shell}`);
         expect(titles).toContain("bb-fg:command:sleep");
         expect(

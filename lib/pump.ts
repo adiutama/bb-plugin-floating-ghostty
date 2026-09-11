@@ -26,12 +26,11 @@ export interface PumpOptions {
   terminalId: string;
   fontSize: number;
   onStatus: (status: TabStatus, detail: string | null) => void;
-  /** Fired when the user presses Enter at a dead shell prompt. */
-  onRequestRestart: () => void;
   /** Fired for shortcuts Ghostty must not swallow (the global toggle). */
   onToggleRequested: () => void;
   /** A meaningful OSC title the shell set, already normalised. Null clears it. */
   onTitle?: (title: string | null) => void;
+  onCwd?: (cwd: string) => void;
   /** The armed-Ctrl latch changed, so the bar can show it. */
   onCtrlArmed?: (armed: boolean) => void;
   /** Cmd/Ctrl+F landed in the terminal; the window should open its find bar. */
@@ -50,7 +49,6 @@ export class TerminalPump {
   private interval = FAST_INTERVAL;
   private pollTimer: number | null = null;
   private reading = false;
-  private restartRequested = false;
   private flushTimer: number | null = null;
   private resizeTimer: number | null = null;
   private outbox: string[] = [];
@@ -69,9 +67,10 @@ export class TerminalPump {
   private searchQuery = "";
   private searchIndex = -1;
   private abort = new AbortController();
-  private titleObserver = new TerminalTitleObserver((title) => {
-    this.options.onTitle?.(normalizeTerminalTitle(title));
-  });
+  private titleObserver = new TerminalTitleObserver(
+    (title) => this.options.onTitle?.(normalizeTerminalTitle(title)),
+    (cwd) => this.options.onCwd?.(cwd),
+  );
 
   constructor(options: PumpOptions) {
     this.options = options;
@@ -320,15 +319,7 @@ export class TerminalPump {
         data = control;
       }
     }
-    if (this.status === "exited" && data.includes("\r")) {
-      // Latched: the pump stays "exited" for the whole restart round trip, so
-      // without this every extra Enter fires another restart, and each one
-      // creates a PTY the tab strip will never show.
-      if (this.restartRequested) return;
-      this.restartRequested = true;
-      this.options.onRequestRestart();
-      return;
-    }
+    if (this.status === "exited") return;
     this.queueInput(data);
   }
 
@@ -502,9 +493,6 @@ export class TerminalPump {
         : exitCode === null
           ? "Shell exited"
           : `Shell exited with code ${exitCode}`;
-    this.terminal?.write(
-      `\r\n\x1b[2m[${label} — press Enter to start a new one]\x1b[0m\r\n`,
-    );
     this.setStatus("exited", label);
   }
 
@@ -529,8 +517,12 @@ export class TerminalPump {
         this.nextSeq = result.nextSeq;
         this.replayPending = false;
         this.interval = FAST_INTERVAL;
-        this.setStatus("live");
-        ok = true;
+        if (result.status === "exited" || result.status === "gone") {
+          this.reportExit(result.status, result.exitCode);
+        } else {
+          this.setStatus("live");
+          ok = true;
+        }
       }
     } catch (error) {
       if (!this.disposed) {

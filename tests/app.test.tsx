@@ -3,6 +3,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { act, fireEvent, waitFor, within } from "@testing-library/react";
 import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
 import { windowController } from "../lib/controller";
+import { projectScopeKey } from "../lib/context";
 import type { ServerTab } from "../lib/tabs";
 
 // Exercise the complete overlay/navigation UI; Ghostty itself has real-WASM pump tests.
@@ -15,8 +16,16 @@ vi.mock("../components/terminal-view", async () => {
       focused,
       onPumpReady,
       onPumpGone,
+      onStatus,
     }: any) => {
       const ref = React.useRef<HTMLTextAreaElement>(null);
+      React.useEffect(() => {
+        const shell = ref.current;
+        const exit = () =>
+          onStatus(terminalId, "exited", "Shell exited with code 0");
+        shell?.addEventListener("shell-exit", exit);
+        return () => shell?.removeEventListener("shell-exit", exit);
+      }, [terminalId, onStatus]);
       React.useEffect(() => {
         onPumpReady(terminalId, {
           focus: () => ref.current?.focus(),
@@ -110,11 +119,20 @@ const scopes = [
     hostId: "local",
     online: true,
   },
+  {
+    key: "project:B",
+    kind: "project",
+    label: "Project B",
+    detail: "/b",
+    hostName: "Local",
+    hostId: "local",
+    online: true,
+  },
 ];
 function tab(id: string, scopeKey: string): ServerTab {
   return {
     terminalId: id,
-    scopeKey,
+    scopeKey: projectScopeKey(scopeKey),
     label: id,
     hostName: "Local",
     cwd: "/tmp",
@@ -128,10 +146,12 @@ async function setup(
     override?: boolean;
     pending?: Promise<void>;
     settings?: Record<string, unknown>;
+    projectless?: boolean;
   } = {},
 ) {
   const app = await loadPluginApp(() => import("../app"));
   let tabs = initial;
+  const exited = new Set<string>();
   let revision = 1;
   const snapshot = () => ({
     revision,
@@ -143,9 +163,12 @@ async function setup(
   const { FloatingTerminal } = await import("../components/floating-terminal");
   let navigate!: (selection: { projectId: string; threadId: string }) => void;
   function Surface() {
-    const [selection, setSelection] = React.useState({
-      projectId: "A",
-      threadId: "thread-one",
+    const [selection, setSelection] = React.useState<{
+      projectId: string | null;
+      threadId: string | null;
+    }>({
+      projectId: options.projectless ? null : "A",
+      threadId: options.projectless ? null : "thread-one",
     });
     navigate = setSelection;
     const rpc = useRpc<typeof import("../server").rpcContract>();
@@ -164,19 +187,16 @@ async function setup(
       },
       rpc: {
         resolveContext: (input: unknown) => {
-          const route = input as { projectId: string };
+          const route = input as { projectId: string | null };
           return route.projectId === "A"
             ? { context, scopes }
             : {
                 context: {
-                  projectId: "B",
+                  projectId: route.projectId,
                   environmentId: null,
                   hostId: "local",
                 },
-                scopes: [
-                  scopes[0],
-                  { ...scopes[1], key: "project:B", label: "Project B" },
-                ],
+                scopes,
               };
         },
         init: () => ({
@@ -196,22 +216,6 @@ async function setup(
           tabs = [...tabs, opened];
           revision++;
           return { snapshot: snapshot(), opened };
-        },
-        setTabOwner: (input: unknown) => {
-          const { terminalId, scopeKey } = input as {
-            terminalId: string;
-            scopeKey: string;
-          };
-          tabs = tabs.map((tab) =>
-            tab.terminalId === terminalId
-              ? {
-                  ...tab,
-                  scopeKey: scopeKey === "global" ? "home:local" : scopeKey,
-                }
-              : tab,
-          );
-          revision++;
-          return { snapshot: snapshot() };
         },
         setTabName: (input: unknown) => {
           const { terminalId, name } = input as {
@@ -241,6 +245,15 @@ async function setup(
           return { snapshot: snapshot(), restarted };
         },
         setActiveTab: () => ({ ok: true }),
+        read: (input: unknown) => ({
+          chunks: [],
+          nextSeq: 0,
+          truncated: false,
+          status: exited.has((input as { terminalId: string }).terminalId)
+            ? "exited"
+            : "running",
+          exitCode: null,
+        }),
         terminalShortcuts: () => [
           {
             key: "Enter",
@@ -255,6 +268,15 @@ async function setup(
     },
   );
   return Object.assign(slot, {
+    exitTerminal: (terminalId: string, notify = true) => {
+      exited.add(terminalId);
+      tabs = tabs.filter((tab) => tab.terminalId !== terminalId);
+      revision++;
+      if (notify)
+        slot
+          .getByRole("textbox", { name: `Shell ${terminalId}` })
+          .dispatchEvent(new Event("shell-exit"));
+    },
     navigate: (selection: { projectId: string; threadId: string }) =>
       navigate(selection),
   });
@@ -265,6 +287,61 @@ function toggle(target: Element | Window = window) {
 function switcher(target: Element | Window = window) {
   fireEvent.keyDown(target, { key: "k", metaKey: true });
 }
+
+it.each(["project:A", "home:local"])(
+  "keeps exit fallback within %s and hides when only other projects remain",
+  async (scopeKey) => {
+    const slot = await setup(
+      [
+        tab("first", scopeKey),
+        tab("second", scopeKey),
+        tab("foreign", "project:B"),
+      ],
+      { projectless: scopeKey === "home:local" },
+    );
+    try {
+      await act(async () => toggle());
+      await slot.findByRole("textbox", { name: "Shell first" });
+      await act(async () => slot.exitTerminal("first"));
+      await slot.findByRole("textbox", { name: "Shell second" });
+      expect(slot.queryByRole("textbox", { name: "Shell first" })).toBeNull();
+      expect(windowController.isOpen()).toBe(true);
+      await act(async () => slot.exitTerminal("second"));
+      await waitFor(() => expect(windowController.isOpen()).toBe(false));
+      expect(
+        slot.inspection.rpcCalls.some((call) =>
+          ["openTab", "restartTab", "closeTab"].includes(call.method),
+        ),
+      ).toBe(false);
+    } finally {
+      slot.lifecycle.unmount();
+    }
+  },
+);
+
+it("removes an unvisited exited shell when search discovers it without changing the active shell", async () => {
+  const slot = await setup([
+    tab("first", "project:A"),
+    tab("hidden", "project:A"),
+  ]);
+  try {
+    await act(async () => toggle());
+    await slot.findByRole("textbox", { name: "Shell first" });
+    slot.exitTerminal("hidden", false);
+    await act(async () => switcher());
+    await slot.findByPlaceholderText("Search terminals");
+    await waitFor(() =>
+      expect(slot.queryByRole("option", { name: /^hidden/ })).toBeNull(),
+    );
+    expect(slot.getByRole("option", { name: /^first/ })).toBeTruthy();
+    expect(windowController.isOpen()).toBe(true);
+    expect(
+      slot.inspection.rpcCalls.filter((call) => call.method === "init"),
+    ).toHaveLength(2);
+  } finally {
+    slot.lifecycle.unmount();
+  }
+}, 20000);
 
 it("opens directly into a newly created worktree shell, and toggles back without ending it", async () => {
   const prompt = document.createElement("textarea");
@@ -296,7 +373,31 @@ it("opens directly into a newly created worktree shell, and toggles back without
   }
 });
 
-it("keeps the switcher flat and project-bounded, filters without changing the shell, and restores focus", async () => {
+it("defaults projectless conversations to No project and keeps project shells out of that list", async () => {
+  const slot = await setup(
+    [tab("project-shell", "project:A"), tab("home-shell", "home:local")],
+    { projectless: true },
+  );
+  try {
+    await act(async () => toggle());
+    const shell = await slot.findByRole("textbox", {
+      name: "Shell home-shell",
+    });
+    await act(async () => switcher(shell));
+    expect(
+      slot.getByRole("button", { name: "Filter terminals: No project" }),
+    ).not.toBeNull();
+    expect(slot.queryByRole("option", { name: /project-shell/ })).toBeNull();
+    expect(slot.getByRole("option", { name: /home-shell/ })).not.toBeNull();
+    expect(
+      slot.getByRole("option", { name: "New terminal" }).textContent,
+    ).toContain("No project");
+  } finally {
+    slot.lifecycle.unmount();
+  }
+});
+
+it("defaults to the thread project, opens project filters with Cmd+P, and switches across projects through All", async () => {
   const slot = await setup([
     tab("global", "home:local"),
     tab("current", "worktree:A:one"),
@@ -304,59 +405,69 @@ it("keeps the switcher flat and project-bounded, filters without changing the sh
     tab("foreign", "project:B"),
   ]);
   try {
-    await act(async () => windowController.show());
+    await act(async () => toggle());
     const shell = await slot.findByRole("textbox", { name: "Shell current" });
-    await waitFor(() => expect(document.activeElement).toBe(shell));
     await act(async () => switcher(shell));
     const search = slot.getByPlaceholderText("Search terminals");
     await waitFor(() => expect(document.activeElement).toBe(search));
     expect(
-      slot
-        .getAllByRole("option")
-        .filter((node) => node.hasAttribute("cmdk-item")),
-    ).toHaveLength(3);
-    expect(slot.queryByRole("option", { name: /foreign/ })).toBeNull();
-    const category = slot.getByLabelText("Filter terminals");
-    fireEvent.keyDown(search, { key: "Tab" });
-    expect(document.activeElement).toBe(category);
-    // Native select navigation must not activate cmdk's highlighted terminal.
-    fireEvent.keyDown(category, { key: "ArrowDown" });
-    expect(
-      slot.getByRole("dialog", { name: "Switch terminal" }),
+      slot.getByRole("button", { name: "Filter terminals: Project A" }),
     ).not.toBeNull();
-    fireEvent.change(category, { target: { value: "global" } });
-    await waitFor(() =>
-      expect(
-        slot.getByRole("button", { name: "Actions for global" }).tabIndex,
-      ).toBe(0),
+    expect(slot.queryByRole("option", { name: /foreign/ })).toBeNull();
+    expect(slot.queryByRole("option", { name: /global/ })).toBeNull();
+    expect(slot.getAllByRole("option")).toHaveLength(3); // Two shells and New.
+    const hostKey = vi.fn();
+    document.addEventListener("keydown", hostKey);
+    try {
+      await act(async () =>
+        fireEvent.keyDown(search, { key: "p", metaKey: true }),
+      );
+      expect(hostKey).not.toHaveBeenCalled();
+    } finally {
+      document.removeEventListener("keydown", hostKey);
+    }
+    const menu = within(
+      document.querySelector(
+        '[role="dialog"][aria-label="Filter by project"]',
+      ) as HTMLElement,
     );
-    fireEvent.keyDown(category, { key: "Tab" });
-    const create = slot.getByRole("button", { name: "New terminal" });
-    expect(document.activeElement).toBe(create);
-    fireEvent.keyDown(create, { key: "Tab" });
-    expect(document.activeElement).toBe(
-      slot.getByRole("button", { name: "Actions for global" }),
+    expect(menu.getAllByRole("option").map((item) => item.textContent)).toEqual(
+      ["All", "No project", "Project A", "Project B"],
     );
-    fireEvent.keyDown(document.activeElement!, { key: "Tab", shiftKey: true });
-    expect(document.activeElement).toBe(create);
-    fireEvent.keyDown(create, { key: "Tab", shiftKey: true });
-    expect(document.activeElement).toBe(category);
-    fireEvent.keyDown(category, { key: "Tab", shiftKey: true });
+    await act(async () =>
+      fireEvent.click(menu.getByRole("option", { name: "No project" })),
+    );
     await waitFor(() => expect(document.activeElement).toBe(search));
+    expect(slot.getByRole("option", { name: /global/ })).not.toBeNull();
     expect(slot.queryByRole("option", { name: /sibling/ })).toBeNull();
-    fireEvent.keyDown(search, { key: "Escape" });
-    await waitFor(() => expect(document.activeElement).toBe(shell));
-    await act(async () => switcher(shell));
-    fireEvent.click(slot.getByRole("option", { name: /sibling/ }));
-    const sibling = slot.getByRole("textbox", { name: "Shell sibling" });
-    await waitFor(() => expect(document.activeElement).toBe(sibling));
-    await act(async () => toggle(sibling));
-    await act(async () => toggle());
-    await waitFor(() => expect(document.activeElement).toBe(sibling));
+    await act(async () =>
+      fireEvent.keyDown(search, { key: "p", metaKey: true }),
+    );
+    await act(async () =>
+      fireEvent.click(
+        within(
+          document.querySelector(
+            '[role="dialog"][aria-label="Filter by project"]',
+          ) as HTMLElement,
+        ).getByRole("option", { name: "All" }),
+      ),
+    );
+    await waitFor(() => expect(document.activeElement).toBe(search));
+    expect(slot.getAllByRole("option")).toHaveLength(5);
+    fireEvent.click(slot.getByRole("option", { name: /foreign/ }));
+    const foreign = slot.getByRole("textbox", { name: "Shell foreign" });
+    await waitFor(() => expect(document.activeElement).toBe(foreign));
+    await act(async () => slot.exitTerminal("foreign"));
+    await waitFor(() => expect(windowController.isOpen()).toBe(false));
+    expect(
+      slot.inspection.rpcCalls.some((call) =>
+        ["openTab", "closeTab"].includes(call.method),
+      ),
+    ).toBe(false);
   } finally {
     slot.lifecycle.unmount();
   }
-});
+}, 60000);
 
 it("leaves BB's native shortcut alone by default and supports opt-in toggling from the switcher", async () => {
   let slot = await setup([tab("current", "worktree:A:one")]);
@@ -556,7 +667,7 @@ it("creates immediately in the current context even while viewing a sibling shel
     await act(async () => switcher());
     fireEvent.click(slot.getByRole("option", { name: /sibling/ }));
     await act(async () => switcher());
-    fireEvent.click(slot.getByRole("button", { name: "New terminal" }));
+    fireEvent.click(slot.getByRole("option", { name: "New terminal" }));
     expect(slot.queryByRole("dialog", { name: "New terminal" })).toBeNull();
     const shell = await slot.findByRole("textbox", { name: "Shell created-1" });
     await waitFor(() => expect(document.activeElement).toBe(shell));
@@ -570,66 +681,59 @@ it("creates immediately in the current context even while viewing a sibling shel
   }
 });
 
-it("changes ownership from the actions menu and makes it available in another project", async () => {
+it("creates in the selected project and offers no ownership transfer", async () => {
   const slot = await setup([tab("current", "worktree:A:one")]);
   try {
     await act(async () => toggle());
-    const shell = await slot.findByRole("textbox", { name: "Shell current" });
+    await slot.findByRole("textbox", { name: "Shell current" });
     await act(async () => switcher());
-    const actions = slot.getByRole("button", { name: "Actions for current" });
-    await act(async () => {
-      fireEvent.keyDown(actions, { key: "Enter" });
-    });
-    const menu = within(document.querySelector('[role="menu"]') as HTMLElement);
-    const hostKey = vi.fn();
-    document.addEventListener("keydown", hostKey);
-    try {
-      fireEvent.keyDown(menu.getByText("Change ownership…"), {
-        key: "p",
-        metaKey: true,
-      });
-      expect(hostKey).not.toHaveBeenCalled();
-    } finally {
-      document.removeEventListener("keydown", hostKey);
-    }
-    expect(menu.getByText("Change ownership…")).not.toBeNull();
-    await act(async () => {
-      fireEvent.click(menu.getByText("Change ownership…"));
-    });
-    const ownership = within(
-      slot.getByRole("dialog", { name: "Change ownership" }),
-    );
-    await act(async () => {
-      fireEvent.click(ownership.getByRole("button", { name: /Global/ }));
-    });
-    await waitFor(() =>
-      expect(document.activeElement).toBe(
-        slot.getByPlaceholderText("Search terminals"),
+    await act(async () =>
+      fireEvent.keyDown(
+        slot.getByRole("button", { name: "Actions for current" }),
+        { key: "Enter" },
       ),
     );
-    expect(
-      slot.inspection.rpcCalls
-        .filter((call) => call.method === "setTabOwner")
-        .map((call) => call.input),
-    ).toEqual([{ terminalId: "current", scopeKey: "global" }]);
-    expect(slot.getByRole("option", { name: /current/ }).textContent).toContain(
-      "Global",
+    const menu = within(document.querySelector('[role="menu"]') as HTMLElement);
+    expect(menu.queryByText("Change ownership…")).toBeNull();
+    await act(async () =>
+      fireEvent.keyDown(document.querySelector('[role="menu"]')!, {
+        key: "Escape",
+      }),
+    );
+    await waitFor(() =>
+      expect(document.querySelector('[role="menu"]')).toBeNull(),
+    );
+    const search = slot.getByPlaceholderText("Search terminals");
+    await act(async () =>
+      fireEvent.keyDown(search, { key: "p", metaKey: true }),
     );
     await act(async () =>
-      slot.navigate({ projectId: "B", threadId: "thread-b" }),
-    );
-    await act(async () => toggle());
-    await waitFor(() => expect(document.activeElement === shell).toBe(true));
-    expect(
-      slot.inspection.rpcCalls.some((call) =>
-        ["openTab", "closeTab", "restartTab"].includes(call.method),
+      fireEvent.click(
+        within(
+          document.querySelector(
+            '[role="dialog"][aria-label="Filter by project"]',
+          ) as HTMLElement,
+        ).getByRole("option", { name: "Project B" }),
       ),
-    ).toBe(false);
+    );
+    await waitFor(() => expect(document.activeElement).toBe(search));
+    const create = slot.getByRole("option", { name: "New terminal" });
+    expect(create.textContent).toContain("Project B");
+    // An empty project's creation row is selected and can be activated with Enter.
+    await waitFor(() =>
+      expect(create.getAttribute("aria-selected")).toBe("true"),
+    );
+    await act(async () => fireEvent.keyDown(search, { key: "Enter" }));
+    await slot.findByRole("textbox", { name: "Shell created-1" });
+    expect(
+      slot.inspection.rpcCalls
+        .filter((call) => call.method === "openTab")
+        .map((call) => call.input),
+    ).toEqual([{ scopeKey: "project:B", cols: 80, rows: 24 }]);
   } finally {
     slot.lifecycle.unmount();
   }
-  // The real Radix menu's focus/layout pass is slow in jsdom.
-}, 20000);
+}, 60000);
 
 it("isolates shell and switcher keys from BB while preserving text, clipboard, and composition", async () => {
   const hostKey = vi.fn();
@@ -908,9 +1012,9 @@ it("uses Cmd+K only in terminal mode and releases it to BB when hidden", async (
 
 it("uses thread-search rows and treats a leading > as terminal search text", async () => {
   const slot = await setup([
-    tab("older", "worktree:A:two"),
     tab("current", "worktree:A:one"),
-    { ...tab("literal", "home:local"), customTitle: ">find output" },
+    tab("older", "worktree:A:two"),
+    { ...tab("literal", "project:A"), customTitle: ">find output" },
   ]);
   try {
     await act(async () => toggle());
@@ -926,10 +1030,17 @@ it("uses thread-search rows and treats a leading > as terminal search text", asy
       slot.queryByRole("button", { name: "Terminal mode actions" }),
     ).toBeNull();
     expect(slot.container.querySelector(".bb-fg-palette-footer")).toBeNull();
+    const create = slot.getByRole("option", { name: "New terminal" });
+    expect(create.closest("[cmdk-list]")).not.toBeNull();
     fireEvent.change(search, { target: { value: ">find" } });
+    expect(slot.queryByRole("option", { name: "New terminal" })).toBeNull();
     expect(slot.queryByRole("combobox", { name: "Search actions" })).toBeNull();
     expect(slot.getByRole("option", { name: />find output/ })).not.toBeNull();
     expect(slot.container.querySelector("mark")?.textContent).toBe(">find");
+    fireEvent.change(search, { target: { value: "no-such-shell" } });
+    expect(slot.queryByRole("option", { name: "New terminal" })).toBeNull();
+    fireEvent.change(search, { target: { value: "" } });
+    expect(slot.getByRole("option", { name: "New terminal" })).not.toBeNull();
     fireEvent.keyDown(search, { key: "Escape" });
     await waitFor(() => expect(document.activeElement).toBe(shell));
   } finally {

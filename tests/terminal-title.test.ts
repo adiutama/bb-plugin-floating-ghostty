@@ -23,3 +23,18 @@ it("discards oversized or cancelled frames and recovers at the next title", () =
   }
   expect(titles).toEqual(["bash"]);
 });
+
+it("tracks fragmented working directory signals independently of shell titles", () => {
+  const titles: string[] = [],
+    directories: string[] = [];
+  const observer = new TerminalTitleObserver(
+    (title) => titles.push(title),
+    (cwd) => directories.push(cwd),
+  );
+  const bytes = new TextEncoder().encode(
+    "\x1b]1337;CurrentDir=/tmp/a b\x07\x1b]0;zsh\x07\x1b]7;file://localhost/tmp/caf%C3%A9\x1b\\\x1b]1337;CurrentDir=relative\x07",
+  );
+  for (const byte of bytes) observer.consume(new Uint8Array([byte]));
+  expect(directories).toEqual(["/tmp/a b", "/tmp/café"]);
+  expect(titles).toEqual(["zsh"]);
+});

@@ -12,6 +12,8 @@ export function useSwitcherTitles(
   terminalIds: string[],
   enabled: boolean,
   onTitle: (terminalId: string, title: string | null) => void,
+  onCwd?: (terminalId: string, cwd: string) => void,
+  onExit?: () => void,
 ): void {
   const idsKey = JSON.stringify(terminalIds);
   useEffect(() => {
@@ -22,9 +24,14 @@ export function useSwitcherTitles(
       terminalId,
       seq: 0,
       replay: true,
-      observer: new TerminalTitleObserver((title) => {
-        if (!cancelled) onTitle(terminalId, normalizeTerminalTitle(title));
-      }),
+      observer: new TerminalTitleObserver(
+        (title) => {
+          if (!cancelled) onTitle(terminalId, normalizeTerminalTitle(title));
+        },
+        (cwd) => {
+          if (!cancelled) onCwd?.(terminalId, cwd);
+        },
+      ),
     }));
     const refresh = async () => {
       let next = 0;
@@ -38,6 +45,8 @@ export function useSwitcherTitles(
               ...(entry.replay ? { replay: true } : {}),
             });
             if (cancelled) return;
+            if (output.status === "exited" || output.status === "gone")
+              onExit?.();
             for (const chunk of output.chunks) {
               entry.observer.consume(base64ToBytes(chunk.dataBase64));
             }
@@ -59,5 +68,5 @@ export function useSwitcherTitles(
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [rpc, idsKey, enabled, onTitle]);
+  }, [rpc, idsKey, enabled, onTitle, onCwd, onExit]);
 }

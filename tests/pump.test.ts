@@ -85,11 +85,11 @@ it("keeps the real renderer scrollable and focused after switching away and back
     fitVersion: 0,
     onStatus: vi.fn(),
     onTitle: vi.fn(),
+    onCwd: vi.fn(),
     onCtrlArmed: vi.fn(),
     onFindRequested: vi.fn(),
     onScrollState: vi.fn(),
     onSearchResults: vi.fn(),
-    onRequestRestart: vi.fn(),
     onToggleRequested: vi.fn(),
     onPumpReady: vi.fn(),
     onPumpGone: vi.fn(),
@@ -145,12 +145,12 @@ it("keeps the real renderer scrollable and focused after switching away and back
     ),
   ).toHaveLength(1);
 });
-const output = (text: string, seq = 1) => ({
+const output = (text: string, seq = 1, exitCode: number | null = null) => ({
   chunks: text ? [{ seq, dataBase64: btoa(text) }] : [],
   nextSeq: seq,
   truncated: false,
   status: "running",
-  exitCode: null,
+  exitCode,
 });
 function createPump(
   call = vi.fn(async (method: string, input: Record<string, unknown>) =>
@@ -172,7 +172,6 @@ function createPump(
     fontSize: 13,
     onStatus,
     onTitle,
-    onRequestRestart: vi.fn(),
     onToggleRequested: vi.fn(),
   });
   pumps.push(pump);
@@ -187,6 +186,30 @@ it("renders actual Ghostty output and suppresses replay-generated terminal repli
     0,
   );
 });
+it.each([true, false])(
+  "reports exit during replay=%s without a restart prompt or accepting more input",
+  async (duringReplay) => {
+    const call = vi.fn(
+      async (method: string, input: Record<string, unknown>) =>
+        method === "read"
+          ? input.replay && !duringReplay
+            ? output("Boo")
+            : { ...output(""), status: "exited", exitCode: 0 }
+          : { ok: true },
+    );
+    const { pump, container, onStatus } = createPump(call);
+    await vi.waitFor(() =>
+      expect(onStatus).toHaveBeenCalledWith(
+        "exited",
+        "Shell exited with code 0",
+      ),
+    );
+    expect(container.textContent).not.toContain("press Enter");
+    pump.send("\r");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(call.mock.calls.some(([method]) => method === "write")).toBe(false);
+  },
+);
 it("stops polling when hidden and keeps the rendered buffer on reopen", async () => {
   const { pump, container, call } = createPump();
   await vi.waitFor(() => expect(container.textContent).toContain("Boo"));

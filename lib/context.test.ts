@@ -3,6 +3,8 @@ import {
   availableHere,
   preferredTerminal,
   preferredScope,
+  contextKey,
+  scopeLabel,
   type TerminalContext,
 } from "./context";
 const context: TerminalContext = {
@@ -24,7 +26,7 @@ describe("terminal context", () => {
       tabs
         .filter((tab) => availableHere(tab.scopeKey, context))
         .map((tab) => tab.terminalId),
-    ).toEqual(["sibling", "global", "project", "current"]);
+    ).toEqual(["sibling", "project", "current"]);
     expect(
       tabs
         .filter((tab) =>
@@ -37,36 +39,26 @@ describe("terminal context", () => {
         .map((tab) => tab.terminalId),
     ).toEqual(["global"]);
   });
-  it("defaults to worktree, then project, then global, never a sibling", () => {
+  it("selects recent terminals across worktrees within the same project", () => {
     const pick = (list: typeof tabs) =>
       preferredTerminal(list, context, undefined, ["global", "sibling"]);
-    expect(pick(tabs)?.terminalId).toBe("current");
+    expect(pick(tabs)?.terminalId).toBe("sibling");
+    expect(pick(tabs.slice(0, 2))).toBeUndefined();
+    expect(preferredTerminal(tabs, context, "project", [])?.terminalId).toBe(
+      "project",
+    );
     expect(
-      pick(tabs.filter((tab) => tab.terminalId !== "current"))?.terminalId,
-    ).toBe("project");
-    expect(pick(tabs.slice(0, 4))?.terminalId).toBe("global");
-    expect(pick(tabs.slice(0, 3))).toBeUndefined();
-  });
-  it("honors an explicit remembered choice without crossing a project boundary", () => {
-    expect(preferredTerminal(tabs, context, "sibling", [])?.terminalId).toBe(
-      "sibling",
-    );
-    expect(preferredTerminal(tabs, context, "global", [])?.terminalId).toBe(
-      "global",
-    );
-    expect(preferredTerminal(tabs, context, "b", [])?.terminalId).toBe(
+      preferredTerminal(tabs, context, "global", ["current"])?.terminalId,
+    ).toBe("current");
+    expect(preferredTerminal(tabs, context, "b", ["current"])?.terminalId).toBe(
       "current",
     );
   });
-  it("uses recency only within the most specific scope", () => {
-    const list = [...tabs, { terminalId: "newer", scopeKey: "worktree:A:one" }];
-    expect(
-      preferredTerminal(list, context, undefined, [
-        "global",
-        "newer",
-        "current",
-      ])?.terminalId,
-    ).toBe("newer");
+  it("shares selection across a project's worktrees and labels projectless shells", () => {
+    expect(contextKey(context)).toBe(
+      contextKey({ ...context, environmentId: "two" }),
+    );
+    expect(scopeLabel("home:local", [])).toBe("No project");
   });
   it("does not silently create somewhere else when the current worktree is offline", () => {
     const scopes = [

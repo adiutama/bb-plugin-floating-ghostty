@@ -8,7 +8,10 @@ export class TerminalTitleObserver {
   private body = "";
   private overflow = false;
 
-  constructor(private readonly onTitle: (title: string) => void) {}
+  constructor(
+    private readonly onTitle: (title: string) => void,
+    private readonly onDirectory: (cwd: string) => void = () => {},
+  ) {}
 
   consume(bytes: Uint8Array): void {
     for (const char of this.decoder.decode(bytes, { stream: true })) {
@@ -24,6 +27,19 @@ export class TerminalTitleObserver {
       ) {
         if (!this.overflow && /^(0|2);/.test(this.body)) {
           this.onTitle(this.body.slice(2));
+        } else if (!this.overflow) {
+          let cwd: string | undefined;
+          if (this.body.startsWith("1337;CurrentDir="))
+            cwd = this.body.slice(16);
+          else if (this.body.startsWith("7;file://")) {
+            try {
+              cwd = decodeURIComponent(new URL(this.body.slice(2)).pathname);
+            } catch {
+              /* Invalid OSC path. */
+            }
+          }
+          if (cwd?.startsWith("/") && !/[\x00-\x1f\x7f]/.test(cwd))
+            this.onDirectory(cwd);
         }
         this.state = "text";
         this.body = "";
