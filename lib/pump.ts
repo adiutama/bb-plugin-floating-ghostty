@@ -13,6 +13,7 @@ import { resolveMonoFont } from "./theme";
 import { loadCore } from "./ghostty";
 import { searchTerminal } from "./search";
 import { TerminalTitleObserver } from "./terminal-title";
+import { installTerminalScrolling } from "./terminal-scroll";
 
 type Rpc = PluginRpcClient<typeof rpcContract>;
 const FAST_INTERVAL = 40;
@@ -75,6 +76,17 @@ export class TerminalPump {
   constructor(options: PumpOptions) {
     this.options = options;
     this.fontSize = options.fontSize;
+    installTerminalScrolling({
+      element: options.container,
+      mode: () => ({
+        alternate: this.core?.usingAltScreen() ?? false,
+        reportsMouse: !!this.core?.mouseTracking() && !!this.core?.mouseSgr(),
+        applicationCursor: this.applicationCursorKeys(),
+      }),
+      rowHeight: () => Math.ceil(this.fontSize * 1.2),
+      send: (input) => this.send(input),
+      signal: this.abort.signal,
+    });
     options.container.dataset.renderer = "ghostty";
     this.applyFont();
     this.refreshTheme();

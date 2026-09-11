@@ -228,3 +228,66 @@ it("restores the latest automatic title from replay without sending terminal rep
   );
   expect(call.mock.calls.some(([method]) => method === "write")).toBe(false);
 });
+
+it("scrolls an alternate-screen app with wheel arrows when mouse reporting is off", async () => {
+  const call = vi.fn(async (method: string, input: Record<string, unknown>) =>
+    method === "read"
+      ? output(input.replay ? "\x1b[?1049h\x1b[?1hready" : "")
+      : { ok: true },
+  );
+  const { container } = createPump(call);
+  await vi.waitFor(() => expect(container.textContent).toContain("ready"));
+  fireEvent.wheel(container, { deltaY: -48 });
+  await vi.waitFor(() =>
+    expect(
+      call.mock.calls
+        .filter(([method]) => method === "write")
+        .map(([, input]) => atob(String(input.dataBase64)))
+        .join(""),
+    ).toBe("\x1bOA".repeat(3)),
+  );
+});
+
+it("lets Shift-wheel scroll history without sending a mouse report to the shell", async () => {
+  const call = vi.fn(async (method: string, input: Record<string, unknown>) =>
+    method === "read"
+      ? output(input.replay ? "\x1b[?1000h\x1b[?1006hready" : "")
+      : { ok: true },
+  );
+  const { container } = createPump(call);
+  await vi.waitFor(() => expect(container.textContent).toContain("ready"));
+  container.scrollTop = 300;
+  fireEvent.wheel(container, { deltaY: -48, shiftKey: true });
+  expect(container.scrollTop).toBe(252);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  expect(call.mock.calls.some(([method]) => method === "write")).toBe(false);
+  fireEvent.wheel(container, { deltaY: 48 });
+  await vi.waitFor(() =>
+    expect(
+      call.mock.calls
+        .filter(([method]) => method === "write")
+        .map(([, input]) => atob(String(input.dataBase64)))
+        .join(""),
+    ).toContain("\x1b[<65;"),
+  );
+});
+
+it("preserves browser history scrolling while containing wheel events inside the terminal", async () => {
+  const { container, call } = createPump();
+  await vi.waitFor(() => expect(container.textContent).toContain("Boo"));
+  const hostWheel = vi.fn((event: Event) => event.preventDefault());
+  document.addEventListener("wheel", hostWheel);
+  try {
+    const wheel = new WheelEvent("wheel", {
+      deltaY: -64,
+      bubbles: true,
+      cancelable: true,
+    });
+    container.dispatchEvent(wheel);
+    expect(wheel.defaultPrevented).toBe(false);
+    expect(hostWheel).not.toHaveBeenCalled();
+    expect(call.mock.calls.some(([method]) => method === "write")).toBe(false);
+  } finally {
+    document.removeEventListener("wheel", hostWheel);
+  }
+});
