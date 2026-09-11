@@ -22,8 +22,15 @@ import { createRequire } from "node:module";
 //     freshly opened one just because it started earlier.
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { ownerOf, projectScopeKey } from "./lib/context";
-import { SHELL_START_COMMAND } from "./lib/shell-integration";
+import { shellStartCommand } from "./lib/shell-integration";
 import { BB_TERMINAL_FONT_SIZE } from "./lib/theme";
+import { hostContract } from "./lib/host-contract";
+import {
+  parseProjectEnvironment,
+  parseProjectEnvironmentVault,
+  PROJECT_ENVIRONMENT_MAX_BYTES,
+  PROJECT_ENVIRONMENT_VAULT_MAX_BYTES,
+} from "./lib/project-environment";
 import {
   meaningfulShellTitle,
   normalizeTerminalTitle,
@@ -75,6 +82,7 @@ const geometrySchema = z.object({
 const contextInput = z
   .object({ projectId: z.string().nullable(), threadId: z.string().nullable() })
   .strict();
+const projectIdSchema = z.string().min(1).max(256);
 const shortcutSchema = z.object({
   key: z.string(),
   mod: z.boolean(),
@@ -99,6 +107,24 @@ export const rpcContract = defineRpcContract({
   terminalShortcuts: {
     input: z.null(),
     output: z.array(shortcutSchema),
+  },
+  getProjectEnvironment: {
+    input: z.object({ projectId: projectIdSchema }).strict(),
+    output: z
+      .object({ text: z.string(), revision: z.number().int().min(0) })
+      .strict(),
+  },
+  saveProjectEnvironment: {
+    input: z
+      .object({
+        projectId: projectIdSchema,
+        text: z.string().max(PROJECT_ENVIRONMENT_MAX_BYTES),
+        expectedRevision: z.number().int().min(0),
+      })
+      .strict(),
+    output: z
+      .object({ revision: z.number().int().min(0), keyCount: z.number().int().min(0) })
+      .strict(),
   },
   /** Everything the window needs on open: directories, surviving tabs, prefs. */
   init: {
@@ -366,7 +392,26 @@ export default async function plugin(bb: BbPluginApi) {
       default: 720,
       experimental_schema: z.number().int().min(240).max(2160),
     },
+    projectEnvironmentVault: {
+      type: "string",
+      label: "Project environment vault",
+      description:
+        "Managed from a project terminal's actions menu. Do not edit this value directly.",
+      secret: true,
+      experimental_schema: z
+        .string()
+        .max(PROJECT_ENVIRONMENT_VAULT_MAX_BYTES)
+        .refine((value) => {
+          try {
+            parseProjectEnvironmentVault(value);
+            return true;
+          } catch {
+            return false;
+          }
+        }, "Project environment vault must contain valid Floating Ghostty data."),
+    },
   });
+  const host = bb.hosts.experimental_client({ contract: hostContract });
 
   // Serializes every read-modify-write of the tab list. Plugin handlers share
   // one Node process, so a promise chain is a sufficient mutex.
@@ -776,6 +821,24 @@ export default async function plugin(bb: BbPluginApi) {
     cols: number,
     rows: number,
   ): Promise<Tab> {
+    let environmentFile: string | null = null;
+    const projectId = ownerOf(scope.key).projectId;
+    if (projectId !== null) {
+      const values = await settings.get();
+      const stored = parseProjectEnvironmentVault(values.projectEnvironmentVault)
+        .projects[projectId];
+      if (stored !== undefined) {
+        const entries = parseProjectEnvironment(stored.text);
+        if (entries.length > 0) {
+          const prepared = await host.call(
+            "prepareProjectEnvironment",
+            { entries },
+            { hostId: scope.hostId },
+          );
+          environmentFile = prepared.path;
+        }
+      }
+    }
     const created = await withTimeout(
       bb.sdk.terminals.create({
         cols,
@@ -787,7 +850,7 @@ export default async function plugin(bb: BbPluginApi) {
                 environmentId: ownerOf(scope.key).environmentId!,
               }
             : { kind: "host_path", hostId: scope.hostId, cwd: scope.cwd },
-        start: { mode: "command", command: SHELL_START_COMMAND },
+        start: { mode: "command", command: shellStartCommand(environmentFile) },
         title: "Shell",
       }),
       CREATE_TIMEOUT_MS,
@@ -862,6 +925,53 @@ export default async function plugin(bb: BbPluginApi) {
       return config.keybindings
         .filter((binding) => binding.command === "terminal.open")
         .map((binding) => binding.shortcut);
+    },
+
+    async getProjectEnvironment({ projectId }) {
+      const values = await settings.get();
+      const stored = parseProjectEnvironmentVault(values.projectEnvironmentVault)
+        .projects[projectId];
+      return stored === undefined
+        ? { text: "", revision: 0 }
+        : { text: stored.text, revision: stored.revision };
+    },
+
+    async saveProjectEnvironment({ projectId, text, expectedRevision }) {
+      const entries = parseProjectEnvironment(text);
+      return serialize(async () => {
+        const values = await settings.get();
+        const vault = parseProjectEnvironmentVault(
+          values.projectEnvironmentVault,
+        );
+        const currentRevision = vault.projects[projectId]?.revision ?? 0;
+        if (currentRevision !== expectedRevision) {
+          throw new Error(
+            "This project environment changed in another window. Reopen it and try again.",
+          );
+        }
+        if (text === "" && currentRevision === 0) {
+          return { revision: 0, keyCount: 0 };
+        }
+        vault.projects[projectId] = {
+          text,
+          revision: currentRevision + 1,
+          updatedAt: new Date().toISOString(),
+        };
+        const serialized = JSON.stringify(vault);
+        if (
+          new TextEncoder().encode(serialized).byteLength >
+          PROJECT_ENVIRONMENT_VAULT_MAX_BYTES
+        ) {
+          throw new Error("The project environment vault is full.");
+        }
+        await settings.experimental_set({
+          projectEnvironmentVault: serialized,
+        });
+        return {
+          revision: currentRevision + 1,
+          keyCount: entries.length,
+        };
+      });
     },
 
     async init() {

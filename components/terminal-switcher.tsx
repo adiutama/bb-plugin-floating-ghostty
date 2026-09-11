@@ -359,6 +359,13 @@ function SessionRow({
           <DropdownMenuItem onSelect={() => onManage(tab.terminalId, "rename")}>
             Rename…
           </DropdownMenuItem>
+          {ownerOf(tab.scopeKey).projectId !== null ? (
+            <DropdownMenuItem
+              onSelect={() => onManage(tab.terminalId, "environment")}
+            >
+              Project environment…
+            </DropdownMenuItem>
+          ) : null}
           <DropdownMenuSeparator />
           <DropdownMenuItem onSelect={() => onRestart(tab.terminalId)}>
             Restart shell

@@ -15,9 +15,14 @@ ZDOTDIR="$__bb_fg_dir"
 
 const ZSH_RC = `ZDOTDIR="$BB_FLOATING_GHOSTTY_ZDOTDIR"
 [[ -r "$ZDOTDIR/.zshrc" ]] && source "$ZDOTDIR/.zshrc"
+if [[ -n "$BB_FLOATING_GHOSTTY_ENV_FILE" && -r "$BB_FLOATING_GHOSTTY_ENV_FILE" ]]; then
+  source "$BB_FLOATING_GHOSTTY_ENV_FILE"
+  command rm -f -- "$BB_FLOATING_GHOSTTY_ENV_FILE"
+  command rmdir -- "\${BB_FLOATING_GHOSTTY_ENV_FILE%/*}" 2>/dev/null
+fi
 command rm -f -- "$__bb_fg_dir/.zshenv" "$__bb_fg_dir/.zprofile" "$__bb_fg_dir/.zshrc"
 command rmdir -- "$__bb_fg_dir" 2>/dev/null
-unset __bb_fg_dir BB_FLOATING_GHOSTTY_ZDOTDIR
+unset __bb_fg_dir BB_FLOATING_GHOSTTY_ZDOTDIR BB_FLOATING_GHOSTTY_ENV_FILE
 autoload -Uz add-zsh-hook
 __bb_fg_prompt() { builtin printf '\\033]1337;CurrentDir=%s\\007' "$PWD"; builtin printf '\\033]0;bb-fg:shell:zsh\\007'; }
 __bb_fg_preexec() {
@@ -41,8 +46,13 @@ elif [[ -r ~/.bash_login ]]; then source ~/.bash_login
 elif [[ -r ~/.profile ]]; then source ~/.profile
 elif [[ -r ~/.bashrc ]]; then source ~/.bashrc
 fi
+if [[ -n "$BB_FLOATING_GHOSTTY_ENV_FILE" && -r "$BB_FLOATING_GHOSTTY_ENV_FILE" ]]; then
+  source "$BB_FLOATING_GHOSTTY_ENV_FILE"
+  command rm -f -- "$BB_FLOATING_GHOSTTY_ENV_FILE"
+  command rmdir -- "\${BB_FLOATING_GHOSTTY_ENV_FILE%/*}" 2>/dev/null
+fi
 command rm -f -- "$BB_FLOATING_GHOSTTY_RC"
-unset BB_FLOATING_GHOSTTY_RC
+unset BB_FLOATING_GHOSTTY_RC BB_FLOATING_GHOSTTY_ENV_FILE
 __bb_fg_prompt() { local result=$?; builtin printf '\\033]1337;CurrentDir=%s\\007' "$PWD"; builtin printf '\\033]0;bb-fg:shell:bash\\007'; return "$result"; }
 __bb_fg_preexec() {
   [[ "$BASH_COMMAND" == __bb_fg_* ]] && return
@@ -66,7 +76,13 @@ fi
 
 // Fish emits its title after fish_prompt/preexec events. Use its title function
 // so a later default directory title cannot overwrite the integration signal.
-const FISH_INIT = `function __bb_fg_directory --on-event fish_prompt
+const FISH_INIT = `if test -n "$BB_FLOATING_GHOSTTY_ENV_FILE"; and test -r "$BB_FLOATING_GHOSTTY_ENV_FILE"
+  source "$BB_FLOATING_GHOSTTY_ENV_FILE"
+  command rm -f -- "$BB_FLOATING_GHOSTTY_ENV_FILE"
+  command rmdir -- (string replace -r '/[^/]+$' '' "$BB_FLOATING_GHOSTTY_ENV_FILE") 2>/dev/null
+end
+set -e BB_FLOATING_GHOSTTY_ENV_FILE
+function __bb_fg_directory --on-event fish_prompt
   printf '\\033]1337;CurrentDir=%s\\007' "$PWD"
 end
 function fish_title
@@ -111,12 +127,32 @@ const SHELL_START_SCRIPT = [
   'exec "$bb_fg_shell" --rcfile "$BB_FLOATING_GHOSTTY_RC" -i',
   ";;",
   'fish) exec "$bb_fg_shell" -l -i -C ' + quote(FISH_INIT) + ";;",
-  '*) exec "$bb_fg_shell";;',
+  "*)",
+  'if [ -n "$BB_FLOATING_GHOSTTY_ENV_FILE" ] && [ -r "$BB_FLOATING_GHOSTTY_ENV_FILE" ]; then',
+  '. "$BB_FLOATING_GHOSTTY_ENV_FILE"',
+  'command rm -f -- "$BB_FLOATING_GHOSTTY_ENV_FILE"',
+  'command rmdir -- "${BB_FLOATING_GHOSTTY_ENV_FILE%/*}" 2>/dev/null',
+  "unset BB_FLOATING_GHOSTTY_ENV_FILE",
+  "fi",
+  'exec "$bb_fg_shell"',
+  ";;",
   "esac",
 ].join("\n");
 
 /** BB evaluates command starts in the user's shell (which may be fish). Enter
  * a POSIX launcher explicitly before evaluating assignments and case syntax.
  */
-export const SHELL_START_COMMAND =
+const BASE_SHELL_START_COMMAND =
   "exec /bin/sh -c " + quote(SHELL_START_SCRIPT);
+
+export function shellStartCommand(environmentFile?: string | null): string {
+  if (!environmentFile) return BASE_SHELL_START_COMMAND;
+  return (
+    "BB_FLOATING_GHOSTTY_ENV_FILE=" +
+    quote(environmentFile) +
+    " " +
+    BASE_SHELL_START_COMMAND
+  );
+}
+
+export const SHELL_START_COMMAND = shellStartCommand();

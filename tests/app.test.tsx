@@ -153,6 +153,7 @@ async function setup(
   let tabs = initial;
   const exited = new Set<string>();
   let revision = 1;
+  let projectEnvironment = { text: "TOKEN=existing", revision: 2 };
   const snapshot = () => ({
     revision,
     tabs,
@@ -264,6 +265,21 @@ async function setup(
             shift: true,
           },
         ],
+        getProjectEnvironment: () => projectEnvironment,
+        saveProjectEnvironment: (input: unknown) => {
+          const value = input as {
+            text: string;
+            expectedRevision: number;
+          };
+          projectEnvironment = {
+            text: value.text,
+            revision: value.text === "" ? 0 : value.expectedRevision + 1,
+          };
+          return {
+            revision: projectEnvironment.revision,
+            keyCount: value.text === "" ? 0 : 1,
+          };
+        },
       },
     },
   );
@@ -865,6 +881,49 @@ it("renames from the actions menu and explicitly deletes the last shell without 
     expect(
       slot.inspection.rpcCalls.some((call) => call.method === "openTab"),
     ).toBe(false);
+  } finally {
+    slot.lifecycle.unmount();
+  }
+}, 40000);
+
+it("edits the environment belonging to a project terminal", async () => {
+  const slot = await setup([tab("current", "worktree:A:one")]);
+  try {
+    await act(async () => toggle());
+    await slot.findByRole("textbox", { name: "Shell current" });
+    await act(async () => switcher());
+    await act(async () =>
+      fireEvent.keyDown(
+        slot.getByRole("button", { name: "Actions for current" }),
+        { key: "Enter" },
+      ),
+    );
+    await act(async () =>
+      fireEvent.click(
+        within(
+          document.querySelector('[role="menu"]') as HTMLElement,
+        ).getByText("Project environment…"),
+      ),
+    );
+    const editor = await slot.findByRole("textbox", {
+      name: "Environment variables for Project A",
+    });
+    expect((editor as HTMLTextAreaElement).value).toBe("TOKEN=existing");
+    fireEvent.change(editor, { target: { value: "TOKEN=updated" } });
+    await act(async () =>
+      fireEvent.click(slot.getByRole("button", { name: "Save" })),
+    );
+    expect(
+      slot.inspection.rpcCalls
+        .filter((call) => call.method === "saveProjectEnvironment")
+        .map((call) => call.input),
+    ).toEqual([
+      {
+        projectId: "A",
+        text: "TOKEN=updated",
+        expectedRevision: 2,
+      },
+    ]);
   } finally {
     slot.lifecycle.unmount();
   }

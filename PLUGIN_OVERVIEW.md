@@ -18,7 +18,9 @@ every project. Compact rows show the shell title above its working directory. Th
 **New terminal** appears in the results when search is empty and creates in the
 selected project (the current BB context under All). Worktrees determine the
 launch directory; project ownership stays fixed. Each session’s **⋯** menu lets
-you rename, restart, or delete it. Names automatically follow the shell and
+you rename, restart, or delete it. Project terminals also expose a dotenv editor
+whose values are injected into new and restarted shells across that project's
+worktrees. Names automatically follow the shell and
 running command unless you pin a custom name. Exited shells disappear automatically;
 the window selects another shell in the same project or closes if none remain.
 

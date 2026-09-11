@@ -54,8 +54,11 @@ application-menu commands remain controlled by BB/the operating system.
 Exited shells disappear automatically. The window selects another shell in the
 same project (or No project), or hides when that project has no shells left.
 
-Each session’s **⋯** menu provides **Rename…**, **Restart shell**, and
-**Delete terminal…**. Managing another session leaves your current shell selected.
+Each project session’s **⋯** menu provides **Project environment…** alongside
+**Rename…**, **Restart shell**, and **Delete terminal…**. The environment editor
+accepts strict dotenv assignments and applies them to new or restarted shells in
+every worktree owned by that project. Existing shells keep the environment they
+started with. Managing another session leaves your current shell selected.
 Closing a management dialog returns to the selector with its search and filter
 preserved. Deletion asks for
 confirmation and stops the shell and its running commands. A connection failure
@@ -112,6 +115,7 @@ native configuration file.
 | Move / resize      | Drag the header / an edge or corner                |
 | Maximize / restore | Session ⋯ menu, or double-click empty header space |
 | Rename             | Selector → session ⋯ → Rename…                     |
+| Project environment| Selector → project session ⋯ → Project environment…|
 | Delete a shell     | Selector → session ⋯ → Delete terminal…            |
 | Restart            | Selector → session ⋯ → Restart shell               |
 | Find               | Cmd/Ctrl+F inside the terminal                     |
@@ -180,6 +184,7 @@ window was unavailable during this implementation.
 - `lib/context.ts` defines project visibility, scope priority, and client selection memory.
 - `components/terminal-switcher.tsx` owns the flat list and filters.
 - `components/terminal-management.tsx` owns naming and deletion dialogs.
+- `components/project-environment-management.tsx` owns the project dotenv editor.
 - `lib/shell-integration.ts` installs session-local shell title hooks; `lib/terminal-title.ts`
   reads bounded OSC title signals because the pinned Ghostty adapter lacks title reporting.
 - `lib/pump.ts` connects one Ghostty renderer to one BB PTY. Hidden tabs stop
@@ -187,8 +192,12 @@ window was unavailable during this implementation.
 - `lib/use-switcher-titles.ts` refreshes inactive titles while the switcher is open,
   without mounting renderers or sending terminal replies.
 - `lib/ghostty.ts` loads the authenticated WASM and adapts Wterm's Ghostty guards.
-- `server.ts` uses public `bb.sdk.terminals` APIs and plugin-owned KV storage.
+- `server.ts` uses public `bb.sdk.terminals` APIs, plugin-owned KV storage, and a
+  BB-protected secret setting for the versioned project environment vault.
   Every terminal operation checks ownership.
+- `host.ts` writes a private one-use export file on the shell's machine. The
+  shell sources and deletes it during startup; secret values never enter terminal
+  creation metadata.
 
 The WASM endpoint resolves the binary from the exact pinned `@wterm/ghostty`
 package. There is no duplicate checked-in binary to fall out of sync. Runtime

@@ -527,6 +527,40 @@
   outline-color: var(--ring);
   background: var(--background);
 }
+.bb-fg-environment textarea {
+  display: block;
+  width: calc(100% - 32px);
+  min-height: min(280px, 42dvh);
+  margin: 0 16px;
+  padding: 10px;
+  resize: vertical;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  outline-color: var(--ring);
+  background: var(--background);
+  color: var(--foreground);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  tab-size: 2;
+}
+.bb-fg-environment-label {
+  display: block;
+  padding: 0 16px 8px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+.bb-fg-environment-loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 18px 16px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+.bb-fg-management-action-space {
+  flex: 1;
+}
 .bb-fg-management-note {
   margin: 0;
   padding: 8px 16px 16px;

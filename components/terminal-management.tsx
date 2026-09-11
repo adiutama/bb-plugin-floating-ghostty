@@ -3,7 +3,7 @@ import { containTab } from "../lib/keyboard";
 import { tabName, type TabState } from "../lib/tabs";
 import { Icon } from "./ui/icon";
 
-export type ManagementMode = "rename" | "delete";
+export type ManagementMode = "rename" | "environment" | "delete";
 export function TerminalManagement({
   mode,
   tab,

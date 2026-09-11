@@ -4,7 +4,7 @@ import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { existsSync } from "node:fs";
-import { SHELL_START_COMMAND } from "../lib/shell-integration";
+import { shellStartCommand } from "../lib/shell-integration";
 
 for (const shell of ["zsh", "bash", "fish"]) {
   const executable = ["/bin", "/usr/bin", "/opt/homebrew/bin", "/usr/local/bin"]
@@ -19,6 +19,13 @@ for (const shell of ["zsh", "bash", "fish"]) {
           join(directory, ".zshrc"),
           "export BB_FG_TEST_CONFIG=loaded\n",
         );
+        const environmentPath = join(directory, "project-environment.sh");
+        await writeFile(
+          environmentPath,
+          "export BB_FG_TEST_CONFIG='injected'\n",
+          { mode: 0o600 },
+        );
+        const command = shellStartCommand(environmentPath);
         const needsTty = shell === "fish";
         // Node's "pipe" is a socket on macOS; script requires a real pipe or tty.
         const child = spawn(
@@ -29,16 +36,16 @@ for (const shell of ["zsh", "bash", "fish"]) {
                   "-c",
                   'cat | /usr/bin/script -q /dev/null "$2" -lc "$1"',
                   "fg-shell-test",
-                  SHELL_START_COMMAND,
+                  command,
                   executable!,
                 ]
               : [
                   "-c",
                   'cat | /usr/bin/script -q -c "$1" /dev/null',
                   "fg-shell-test",
-                  SHELL_START_COMMAND,
+                  command,
                 ]
-            : ["-lc", SHELL_START_COMMAND],
+            : ["-lc", command],
           {
             env: {
               ...process.env,
@@ -109,8 +116,8 @@ for (const shell of ["zsh", "bash", "fish"]) {
         expect(
           titles.filter((title) => title === `bb-fg:shell:${shell}`).length,
         ).toBeGreaterThan(1);
-        if (shell === "zsh")
-          expect(output.includes("config=loaded")).toBe(true);
+        expect(output.includes("config=injected")).toBe(true);
+        expect(existsSync(environmentPath)).toBe(false);
         expect(
           (await readdir(directory)).filter((name) =>
             name.startsWith("bb-ghostty."),

@@ -11,8 +11,16 @@ afterEach(async () => {
   vi.restoreAllMocks();
   for (const cleanup of cleanups.splice(0)) await cleanup();
 });
-async function setup(settings: Record<string, boolean> = {}) {
-  const host = createFakePluginHost({ pluginId: "floating-ghostty", settings });
+async function setup(settings: Record<string, boolean | string> = {}) {
+  const host = createFakePluginHost({
+    pluginId: "floating-ghostty",
+    settings,
+    experimental_callHostRpc: async ({ method }) => {
+      if (method === "prepareProjectEnvironment")
+        return { path: "/private/tmp/floating-ghostty/environment.sh" };
+      throw new Error(`Unexpected host method ${method}`);
+    },
+  });
   cleanups.push(() => host.harness.lifecycle.dispose());
   const sessions = new Map<string, Record<string, unknown>>();
   let next = 0;
@@ -134,6 +142,80 @@ describe("Floating Ghostty backend", () => {
         dataBase64: Buffer.alloc(65536, 65).toString("base64"),
       }),
     ).resolves.toEqual({ ok: true });
+  });
+  it("persists project environments with conflict detection", async () => {
+    const { call, harness } = await setup();
+    await expect(
+      call("saveProjectEnvironment", {
+        projectId: "A",
+        text: "TOKEN=secret",
+        expectedRevision: 0,
+      }),
+    ).resolves.toEqual({ revision: 1, keyCount: 1 });
+    await expect(
+      call("getProjectEnvironment", { projectId: "A" }),
+    ).resolves.toEqual({ text: "TOKEN=secret", revision: 1 });
+    await expect(
+      call("saveProjectEnvironment", {
+        projectId: "A",
+        text: "TOKEN=stale",
+        expectedRevision: 0,
+      }),
+    ).rejects.toThrow(/another window/);
+    await expect(
+      call("saveProjectEnvironment", {
+        projectId: "A",
+        text: "",
+        expectedRevision: 1,
+      }),
+    ).resolves.toEqual({ revision: 2, keyCount: 0 });
+    await expect(
+      call("saveProjectEnvironment", {
+        projectId: "A",
+        text: "TOKEN=stale-after-clear",
+        expectedRevision: 1,
+      }),
+    ).rejects.toThrow(/another window/);
+    const reloaded = await harness.lifecycle.reload(plugin);
+    cleanups.push(() => reloaded.harness.lifecycle.dispose());
+    await expect(
+      reloaded.harness.behavior.callRpc("getProjectEnvironment", {
+        projectId: "A",
+      }),
+    ).resolves.toEqual({ text: "", revision: 2 });
+  });
+  it("prepares project values on the target host without putting them in terminal metadata", async () => {
+    const { call, harness } = await setup();
+    harness.inspection.sdk.stub("projects.list", async () => [
+      {
+        id: "A",
+        name: "Project A",
+        sources: [{ hostId: "local", path: "/a", isDefault: true }],
+      },
+    ]);
+    await call("saveProjectEnvironment", {
+      projectId: "A",
+      text: "TOKEN=super-secret",
+      expectedRevision: 0,
+    });
+    await call("openTab", {
+      scopeKey: "project:A",
+      cols: 80,
+      rows: 24,
+    });
+    expect(harness.experimental_hostRpcCalls).toHaveLength(1);
+    expect(harness.experimental_hostRpcCalls[0]).toMatchObject({
+      method: "prepareProjectEnvironment",
+      hostId: "local",
+      input: { entries: [{ key: "TOKEN", value: "super-secret" }] },
+    });
+    const create = harness.inspection.sdk.callsTo("terminals.create")[0]?.[0] as {
+      start: { command: string };
+    };
+    expect(create.start.command).toContain(
+      "/private/tmp/floating-ghostty/environment.sh",
+    );
+    expect(create.start.command).not.toContain("super-secret");
   });
   it("serves the exact pinned WASM behind token authentication", async () => {
     const { harness } = await setup();

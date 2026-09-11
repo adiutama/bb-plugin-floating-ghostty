@@ -17,6 +17,7 @@ import { useIsCompactViewport } from "@/components/ui/hooks/use-compact-viewport
 import { TerminalSwitcher } from "./terminal-switcher";
 import { TerminalManagement, type ManagementMode } from "./terminal-management";
 import { TerminalHeader } from "./terminal-header";
+import { ProjectEnvironmentManagement } from "./project-environment-management";
 import type { ScopeOption } from "@/lib/scopes";
 import { FindBar } from "@/components/find-bar";
 import { KeyToolbar } from "@/components/key-toolbar";
@@ -28,6 +29,7 @@ import {
   preferredTerminal,
   readSelection,
   rememberSelection,
+  scopeLabel,
   type TerminalContext,
 } from "../lib/context";
 import {
@@ -1144,6 +1146,17 @@ export function FloatingTerminal({
               tab={managedTab}
               onName={changeName}
               onDelete={() => closeTab(managedTab.terminalId)}
+              onDismiss={dismissManagement}
+            />
+          ) : null}
+          {mode === "environment" &&
+          managedTab &&
+          ownerOf(managedTab.scopeKey).projectId ? (
+            <ProjectEnvironmentManagement
+              key={`environment:${ownerOf(managedTab.scopeKey).projectId}`}
+              rpc={rpc}
+              projectId={ownerOf(managedTab.scopeKey).projectId!}
+              projectLabel={scopeLabel(managedTab.scopeKey, scopes)}
               onDismiss={dismissManagement}
             />
           ) : null}
