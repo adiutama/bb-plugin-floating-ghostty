@@ -1,4 +1,5 @@
 import { definePluginApp, useRpc, useBbContext } from "@get-bb/plugin-sdk/app";
+import { mountSettingsPresentation } from "./lib/settings-presentation";
 import { mountNativeLauncherOverride } from "./lib/native-launcher";
 import { FloatingTerminal } from "./components/floating-terminal";
 import { windowController } from "./lib/controller";
@@ -15,7 +16,14 @@ function FloatingGhosttyOverlay() {
 export default definePluginApp((app) => {
   app.contentScripts.register({
     id: "native-terminal-launcher",
-    mount: () => mountNativeLauncherOverride(),
+    mount: () => {
+      const releaseLauncher = mountNativeLauncherOverride();
+      const releaseSettings = mountSettingsPresentation();
+      return () => {
+        releaseLauncher();
+        releaseSettings();
+      };
+    },
   });
   app.slots.experimental_appOverlay({
     id: "ghost-window",

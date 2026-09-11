@@ -313,9 +313,31 @@ export default async function plugin(bb: BbPluginApi) {
   );
 
   const settings = bb.settings.define({
+    // Keep the stored master key so existing opt-ins survive this UI change.
+    overrideNativeShortcut: {
+      type: "boolean",
+      label: "App-wide terminal override",
+      description:
+        "Use Floating Ghostty for the BB entry points enabled below.",
+      default: false,
+    },
+    overrideLaunchActions: {
+      type: "boolean",
+      label: "Replace terminal launch actions",
+      description:
+        "Open Floating Ghostty from Start terminal and the command palette.",
+      default: true,
+    },
+    overrideKeyboard: {
+      type: "boolean",
+      label: "Use BB terminal shortcut",
+      description: "Follow BB’s configured terminal shortcut.",
+      default: true,
+    },
     shortcutEnabled: {
       type: "boolean",
       label: "Toggle with Ctrl+backtick",
+      description: "Available when app-wide terminal override is off.",
       default: true,
     },
     centerOnOpen: {
@@ -343,13 +365,6 @@ export default async function plugin(bb: BbPluginApi) {
       label: "Height (px)",
       default: 720,
       experimental_schema: z.number().int().min(240).max(2160),
-    },
-    overrideNativeShortcut: {
-      type: "boolean",
-      label: "Override BB terminal shortcut",
-      description:
-        "Use BB’s terminal shortcut, hide Start terminal, and disable Ctrl+backtick while enabled.",
-      default: false,
     },
   });
 
@@ -834,7 +849,7 @@ export default async function plugin(bb: BbPluginApi) {
 
     async terminalShortcuts() {
       const values = await settings.get();
-      if (!values.overrideNativeShortcut) return [];
+      if (!values.overrideNativeShortcut || !values.overrideKeyboard) return [];
       const config = await withTimeout(
         bb.sdk.system.config(),
         SDK_TIMEOUT_MS,

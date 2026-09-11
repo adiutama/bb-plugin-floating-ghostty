@@ -139,6 +139,10 @@ export function FloatingTerminal({
   contextRef.current = terminalContext;
   const shortcutEnabled = liveSettings?.shortcutEnabled !== false;
   const overrideNativeShortcut = liveSettings?.overrideNativeShortcut === true;
+  const overrideKeyboard =
+    overrideNativeShortcut && liveSettings?.overrideKeyboard !== false;
+  const overrideLaunchActions =
+    overrideNativeShortcut && liveSettings?.overrideLaunchActions !== false;
   const [nativeShortcuts, setNativeShortcuts] = useState<Shortcut[]>([]);
   const [fontSize, setFontSize] = useState(BB_TERMINAL_FONT_SIZE);
   const [themeVersion, setThemeVersion] = useState(0);
@@ -574,9 +578,9 @@ export function FloatingTerminal({
   // ---------------------------------------------------------- environment
 
   useEffect(() => {
-    nativeLauncherOverride.set(overrideNativeShortcut);
+    nativeLauncherOverride.set(overrideLaunchActions);
     return () => nativeLauncherOverride.set(false);
-  }, [overrideNativeShortcut]);
+  }, [overrideLaunchActions]);
 
   useEffect(() => {
     // Coming back from the sheet, re-read the window's own geometry rather than
@@ -645,7 +649,7 @@ export function FloatingTerminal({
   }, []);
 
   useEffect(() => {
-    if (!overrideNativeShortcut) {
+    if (!overrideKeyboard) {
       setNativeShortcuts([]);
       return;
     }
@@ -665,7 +669,7 @@ export function FloatingTerminal({
       window.clearInterval(interval);
       window.removeEventListener("focus", refresh);
     };
-  }, [rpc, overrideNativeShortcut]);
+  }, [rpc, overrideKeyboard]);
 
   useEffect(() => {
     const mac = /Mac|iPhone|iPad/.test(navigator.platform);
@@ -675,7 +679,7 @@ export function FloatingTerminal({
         (!overrideNativeShortcut &&
           shortcutEnabled &&
           isAlternativeToggle(event)) ||
-        (overrideNativeShortcut &&
+        (overrideKeyboard &&
           nativeShortcuts.some((shortcut) =>
             matchesShortcut(event, shortcut, mac),
           ));
@@ -708,6 +712,7 @@ export function FloatingTerminal({
   }, [
     shortcutEnabled,
     overrideNativeShortcut,
+    overrideKeyboard,
     nativeShortcuts,
     open,
     loading,

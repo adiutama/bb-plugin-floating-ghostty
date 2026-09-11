@@ -1,56 +1,58 @@
 // @vitest-environment jsdom
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import {
   mountNativeLauncherOverride,
   nativeLauncherOverride,
 } from "./native-launcher";
+import { windowController } from "./controller";
 
 afterEach(() => {
   nativeLauncherOverride.set(false);
+  windowController.hide();
   document.body.replaceChildren();
+  vi.restoreAllMocks();
 });
 
-function renderActions() {
-  // Current host action row: action button, shortcut hint, and reorder handle.
-  const surface = document.createElement("div");
-  surface.dataset.testid = "new-tab-actions";
-  surface.innerHTML = `<section><div><div data-row="terminal"><button id="file-search-result-start-terminal">Start terminal</button><span>⌘⇧↵</span><button aria-label="Reorder Start terminal"></button></div><div data-row="browser"><button>Open browser</button></div></div></section>`;
-  document.body.append(surface);
-  return surface;
-}
-
-it("hides the whole native action only when opted in and covers host rerenders", () => {
-  let surface = renderActions();
-  const dispose = mountNativeLauncherOverride();
-  const row = () =>
-    surface.querySelector<HTMLElement>('[data-row="terminal"]')!;
-  try {
-    expect(getComputedStyle(row()).display).not.toBe("none");
-    nativeLauncherOverride.set(true);
-    expect(getComputedStyle(row()).display).toBe("none");
-    expect(
-      getComputedStyle(surface.querySelector('[data-row="browser"]')!).display,
-    ).not.toBe("none");
-    surface.remove();
-    surface = renderActions();
-    expect(getComputedStyle(row()).display).toBe("none");
-    nativeLauncherOverride.set(false);
-    expect(getComputedStyle(row()).display).not.toBe("none");
-    expect(surface.querySelector("button")?.textContent).toBe("Start terminal");
-  } finally {
-    dispose();
-  }
+it("replaces Start terminal on every page without hiding the action, and restores it on unload", () => {
+  const button = document.createElement("button");
+  button.id = "file-search-result-start-terminal";
+  button.textContent = "Start terminal";
+  const native = vi.fn();
+  button.addEventListener("click", native);
+  document.body.append(button);
+  const release = mountNativeLauncherOverride();
+  button.click();
+  expect(native).toHaveBeenCalledTimes(1);
+  nativeLauncherOverride.set(true);
+  button.click();
+  expect(native).toHaveBeenCalledTimes(1);
+  expect(windowController.isOpen()).toBe(true);
+  expect(button.hidden).toBe(false);
+  windowController.hide();
+  release();
+  button.click();
+  expect(native).toHaveBeenCalledTimes(2);
+  expect(windowController.isOpen()).toBe(false);
 });
 
-it("restores BB on plugin unload even with override enabled", () => {
-  const surface = renderActions();
+it("redirects pointer and keyboard command-palette terminal actions and disposes pending opens", async () => {
+  document.body.innerHTML =
+    '<div data-testid="command-palette"><input /><div role="option" aria-selected="true"><span>Open terminal</span><span>Panel</span></div></div>';
+  const palette = document.body.firstElementChild!;
+  const native = vi.fn();
+  palette.addEventListener("click", native);
   nativeLauncherOverride.set(true);
-  const dispose = mountNativeLauncherOverride();
-  const row = surface.querySelector('[data-row="terminal"]')!;
-  expect(getComputedStyle(row).display).toBe("none");
-  dispose();
-  expect(getComputedStyle(row).display).not.toBe("none");
-  nativeLauncherOverride.set(false);
-  nativeLauncherOverride.set(true);
-  expect(getComputedStyle(row).display).not.toBe("none");
+  const release = mountNativeLauncherOverride();
+  palette.querySelector<HTMLElement>('[role="option"]')!.click();
+  expect(native).not.toHaveBeenCalled();
+  await vi.waitFor(() => expect(windowController.isOpen()).toBe(true));
+  windowController.hide();
+  palette
+    .querySelector("input")!
+    .dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+    );
+  release();
+  await new Promise((resolve) => setTimeout(resolve, 220));
+  expect(windowController.isOpen()).toBe(false);
 });
