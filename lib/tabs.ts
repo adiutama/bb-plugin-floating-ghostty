@@ -21,11 +21,12 @@ export interface TabState {
   statusDetail: string | null;
   /** An OSC title the shell set; the tab strip prefers it over `label`. */
   shellTitle: string | null;
+  customTitle?: string | null;
 }
 
 /** What the tab strip shows, qualified when another machine could be mistaken for this one. */
 export function tabName(tab: TabState, showHost = false): string {
-  const name = tab.shellTitle ?? tab.label;
+  const name = tab.customTitle ?? tab.shellTitle ?? tab.label;
   return showHost && tab.hostName !== "" ? `${name} · ${tab.hostName}` : name;
 }
 
@@ -45,6 +46,7 @@ export interface ServerTab {
   cwd: string;
   status: string;
   shellTitle: string | null;
+  customTitle?: string | null;
 }
 
 export interface Snapshot {
@@ -81,6 +83,7 @@ function fromServer(tab: ServerTab): TabState {
         : "exited",
     statusDetail: null,
     shellTitle: tab.shellTitle,
+    customTitle: tab.customTitle ?? null,
   };
 }
 
@@ -109,7 +112,8 @@ export function tabsReducer(state: TabsState, action: TabsAction): TabsState {
         if (
           existing.shellTitle === tab.shellTitle &&
           existing.label === tab.label &&
-          existing.scopeKey === tab.scopeKey
+          existing.scopeKey === tab.scopeKey &&
+          (existing.customTitle ?? null) === (tab.customTitle ?? null)
         ) {
           return existing;
         }
@@ -118,6 +122,7 @@ export function tabsReducer(state: TabsState, action: TabsAction): TabsState {
           scopeKey: tab.scopeKey,
           label: tab.label,
           shellTitle: tab.shellTitle,
+          customTitle: tab.customTitle ?? null,
         };
       });
 

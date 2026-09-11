@@ -12,6 +12,7 @@ import { controlCode } from "./keys";
 import { resolveMonoFont } from "./theme";
 import { loadCore } from "./ghostty";
 import { searchTerminal } from "./search";
+import { TerminalTitleObserver } from "./terminal-title";
 
 type Rpc = PluginRpcClient<typeof rpcContract>;
 const FAST_INTERVAL = 40;
@@ -67,6 +68,9 @@ export class TerminalPump {
   private searchQuery = "";
   private searchIndex = -1;
   private abort = new AbortController();
+  private titleObserver = new TerminalTitleObserver((title) => {
+    this.options.onTitle?.(normalizeTerminalTitle(title));
+  });
 
   constructor(options: PumpOptions) {
     this.options = options;
@@ -129,10 +133,6 @@ export class TerminalPump {
         cursorBlink: true,
         onData: (data) => {
           if (this.replayWrites === 0) this.handleInput(data);
-        },
-        onTitle: (title) => {
-          if (this.replayWrites === 0)
-            this.options.onTitle?.(normalizeTerminalTitle(title));
         },
         onResize: (cols, rows) => this.scheduleResize(cols, rows),
       });
@@ -237,6 +237,7 @@ export class TerminalPump {
   }
 
   private writeOutput(bytes: Uint8Array, replay: boolean): void {
+    this.titleObserver.consume(bytes);
     if (replay) this.replayWrites++;
     try {
       this.terminal?.write(bytes);

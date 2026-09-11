@@ -79,18 +79,20 @@ function createPump(
   });
   document.body.append(container);
   const onStatus = vi.fn();
+  const onTitle = vi.fn();
   const pump = new TerminalPump({
     container,
     rpc: { call } as PluginRpcClient<typeof rpcContract>,
     terminalId: "owned",
     fontSize: 13,
     onStatus,
+    onTitle,
     onRequestRestart: vi.fn(),
     onToggleRequested: vi.fn(),
   });
   pumps.push(pump);
   pump.setVisible(true);
-  return { pump, container, call, onStatus };
+  return { pump, container, call, onStatus, onTitle };
 }
 it("renders actual Ghostty output and suppresses replay-generated terminal replies", async () => {
   const { container, call } = createPump();
@@ -212,4 +214,17 @@ it("delivers actual terminal control keys before isolating BB shortcuts and pres
     document.removeEventListener("keydown", hostKey);
     wrapper.unmount();
   }
+});
+
+it("restores the latest automatic title from replay without sending terminal replies", async () => {
+  const call = vi.fn(async (method: string, input: Record<string, unknown>) =>
+    method === "read"
+      ? output(input.replay ? "\x1b]0;bb-fg:shell:zsh\x07ready\x1b[6n" : "")
+      : { ok: true },
+  );
+  const { onTitle } = createPump(call);
+  await vi.waitFor(() =>
+    expect(onTitle).toHaveBeenCalledWith("bb-fg:shell:zsh"),
+  );
+  expect(call.mock.calls.some(([method]) => method === "write")).toBe(false);
 });

@@ -22,7 +22,12 @@ import { createRequire } from "node:module";
 //     freshly opened one just because it started earlier.
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { availableHere, ownerOf } from "./lib/context";
-import { meaningfulShellTitle } from "./lib/terminal-io";
+import { SHELL_START_COMMAND } from "./lib/shell-integration";
+import { BB_TERMINAL_FONT_SIZE } from "./lib/theme";
+import {
+  meaningfulShellTitle,
+  normalizeTerminalTitle,
+} from "./lib/terminal-io";
 import { z } from "zod";
 
 /** Cap on the scrollback replayed when the window (re)attaches to a session. */
@@ -50,12 +55,9 @@ const tabSchema = z.object({
   cwd: z.string(),
   status: z.string(),
   exitCode: z.number().int().nullable(),
-  /**
-   * A title the shell set over OSC, or null while the session still wears the
-   * one `createSession` stamped. Lives on the bb session rather than in plugin
-   * storage, so `bb terminal list` and bb's own UI show the same name.
-   */
+  /** Automatic title and pinned user name are independent plugin metadata. */
   shellTitle: z.string().nullable(),
+  customTitle: z.string().nullable(),
 });
 
 /** The authoritative tab state, versioned so stale replies can be discarded. */
@@ -119,6 +121,19 @@ export const rpcContract = defineRpcContract({
       .extend(geometrySchema.shape)
       .strict(),
     output: z.object({ snapshot: snapshotSchema, opened: tabSchema }),
+  },
+  setTabName: {
+    input: z
+      .object({
+        terminalId: z.string(),
+        name: z.string().trim().max(80).nullable(),
+      })
+      .strict(),
+    output: z.object({ snapshot: snapshotSchema }),
+  },
+  setTabOwner: {
+    input: z.object({ terminalId: z.string(), scopeKey: z.string() }).strict(),
+    output: z.object({ snapshot: snapshotSchema }),
   },
   promoteTab: {
     input: z
@@ -207,6 +222,9 @@ interface StoredTab {
   /** Ownership can widen without moving the process or its restart destination. */
   launchScopeKey?: string;
   hostId?: string;
+  name?: string | null;
+  shellName?: string;
+  autoTitle?: string | null;
 }
 
 /**
@@ -292,12 +310,6 @@ export default async function plugin(bb: BbPluginApi) {
   );
 
   const settings = bb.settings.define({
-    fontSize: {
-      type: "select",
-      label: "Font size",
-      options: ["11", "12", "13", "14", "16", "18"],
-      default: "13",
-    },
     shortcutEnabled: {
       type: "boolean",
       label: "Toggle with Ctrl+backtick",
@@ -419,6 +431,9 @@ export default async function plugin(bb: BbPluginApi) {
           scopeKey: z.string(),
           launchScopeKey: z.string().optional(),
           hostId: z.string().optional(),
+          name: z.string().nullable().optional(),
+          shellName: z.string().optional(),
+          autoTitle: z.string().nullable().optional(),
         }),
       )
       .safeParse(await bb.storage.kv.get(TABS_KEY));
@@ -430,6 +445,50 @@ export default async function plugin(bb: BbPluginApi) {
       !(await readStoredTabs()).some((tab) => tab.terminalId === terminalId)
     ) {
       throw new Error("That terminal does not belong to Floating Ghostty.");
+    }
+  }
+
+  async function confirmedAbsent(entry: StoredTab): Promise<boolean> {
+    try {
+      const launchKey = entry.launchScopeKey ?? entry.scopeKey;
+      const owner = ownerOf(launchKey);
+      const hostId =
+        entry.hostId ??
+        (owner.kind === "home"
+          ? launchKey.slice(5)
+          : (await requireScope(launchKey)).hostId);
+      const result = await withTimeout(
+        bb.sdk.terminals.list({
+          scope:
+            owner.kind === "worktree" && owner.environmentId
+              ? { kind: "environment", environmentId: owner.environmentId }
+              : { kind: "host_path", hostId },
+        }),
+        SDK_TIMEOUT_MS,
+        "terminals.list",
+      );
+      return !result.sessions.some(
+        (session) => session.id === entry.terminalId,
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  async function terminateOwned(terminalId: string): Promise<void> {
+    const entry = (await readStoredTabs()).find(
+      (entry) => entry.terminalId === terminalId,
+    );
+    if (!entry)
+      throw new Error("That terminal does not belong to Floating Ghostty.");
+    try {
+      await withTimeout(
+        bb.sdk.terminals.close({ terminalId, mode: "force" }),
+        SDK_TIMEOUT_MS,
+        "terminals.close",
+      );
+    } catch (error) {
+      if (!(await confirmedAbsent(entry))) throw error;
     }
   }
 
@@ -556,7 +615,7 @@ export default async function plugin(bb: BbPluginApi) {
             ) ??
             worktreeScopes.get(entry.launchScopeKey ?? entry.scopeKey) ??
             null;
-          const label = scope?.label ?? labelFromCwd(session.initialCwd);
+          const label = entry.shellName ?? "Shell";
           const hostName =
             scope?.hostName ??
             scopes.find(
@@ -571,24 +630,42 @@ export default async function plugin(bb: BbPluginApi) {
             cwd: session.initialCwd,
             status: session.status,
             exitCode: session.exitCode,
-            shellTitle: meaningfulShellTitle(session.title, {
-              label,
-              defaultTitle: defaultTitle(label, hostName),
-              cwd: session.initialCwd,
-            }),
+            customTitle: entry.name ?? null,
+            shellTitle:
+              entry.autoTitle !== undefined
+                ? entry.autoTitle
+                : meaningfulShellTitle(session.title, {
+                    label: scope?.label ?? labelFromCwd(session.initialCwd),
+                    defaultTitle: defaultTitle(
+                      scope?.label ?? labelFromCwd(session.initialCwd),
+                      hostName,
+                    ),
+                    cwd: session.initialCwd,
+                  }),
           };
           lastKnownTabs.set(tab.terminalId, tab);
           return tab;
-        } catch (error) {
-          if (error instanceof SdkTimeoutError) {
-            // Slow, not gone: keep the tab on its last known state rather
-            // than pruning a live session just because the host is laggy.
-            sawTimeout = true;
-            return lastKnownTabs.get(entry.terminalId) ?? null;
+        } catch {
+          if (await confirmedAbsent(entry)) {
+            forgetTab(entry.terminalId);
+            return null;
           }
-          // Session is gone entirely; drop the tab.
-          forgetTab(entry.terminalId);
-          return null;
+          sawTimeout = true;
+          return (
+            lastKnownTabs.get(entry.terminalId) ?? {
+              terminalId: entry.terminalId,
+              scopeKey: entry.scopeKey,
+              label: entry.shellName ?? "Shell",
+              hostName:
+                scopes.find((scope) => scope.hostId === entry.hostId)
+                  ?.hostName ?? "",
+              cwd: "",
+              status: "disconnected",
+              exitCode: null,
+              shellTitle: entry.autoTitle ?? null,
+              customTitle: entry.name ?? null,
+            }
+          );
         }
       }),
     );
@@ -683,8 +760,8 @@ export default async function plugin(bb: BbPluginApi) {
                 environmentId: ownerOf(scope.key).environmentId!,
               }
             : { kind: "host_path", hostId: scope.hostId, cwd: scope.cwd },
-        // `bb terminal list` has no grouping to lean on, so name the machine here.
-        title: defaultTitle(scope.label, scope.hostName),
+        start: { mode: "command", command: SHELL_START_COMMAND },
+        title: "Shell",
       }),
       CREATE_TIMEOUT_MS,
       "terminals.create",
@@ -693,12 +770,13 @@ export default async function plugin(bb: BbPluginApi) {
     return {
       terminalId: created.id,
       scopeKey: scope.key,
-      label: scope.label,
+      label: "Shell",
       hostName: scope.hostName,
       cwd: created.initialCwd,
       status: created.status,
       exitCode: created.exitCode,
       shellTitle: null,
+      customTitle: null,
     };
   }
 
@@ -799,13 +877,12 @@ export default async function plugin(bb: BbPluginApi) {
         readRecent(),
         settings.get(),
       ]);
-      const parsedFontSize = Number.parseInt(values.fontSize, 10);
       return {
         snapshot: snap,
         scopes,
         recentScopeKeys,
         prefs: {
-          fontSize: Number.isFinite(parsedFontSize) ? parsedFontSize : 13,
+          fontSize: BB_TERMINAL_FONT_SIZE,
           shortcutEnabled: values.shortcutEnabled,
           overrideNativeShortcut: values.overrideNativeShortcut,
         },
@@ -826,6 +903,7 @@ export default async function plugin(bb: BbPluginApi) {
           scopeKey: opened.scopeKey,
           launchScopeKey: scope.key,
           hostId: scope.hostId,
+          autoTitle: null,
         });
         await bb.storage.kv.set(TABS_KEY, stored);
         await bb.storage.kv.set(ACTIVE_TAB_KEY, opened.terminalId);
@@ -834,6 +912,60 @@ export default async function plugin(bb: BbPluginApi) {
         lastKnownTabs.set(opened.terminalId, opened);
         rememberStatus(opened.terminalId, opened.status, opened.exitCode);
         return { snapshot: await snapshot(), opened };
+      });
+    },
+
+    async setTabName({ terminalId, name }) {
+      const clean = name?.replace(/[\x00-\x1f\x7f]/g, "").trim() || null;
+      const result = await serialize(async () => {
+        const stored = await readStoredTabs();
+        const entry = stored.find((item) => item.terminalId === terminalId);
+        if (!entry)
+          throw new Error("That terminal does not belong to Floating Ghostty.");
+        entry.name = clean;
+        await bb.storage.kv.set(TABS_KEY, stored);
+        const known = lastKnownTabs.get(terminalId);
+        if (known)
+          lastKnownTabs.set(terminalId, { ...known, customTitle: clean });
+        await bumpRevision();
+        return { snapshot: await snapshot() };
+      });
+      return result;
+    },
+
+    async setTabOwner({ terminalId, scopeKey }) {
+      await requireOwnedTab(terminalId);
+      // Ownership changes do not require moving or reconnecting the process.
+      if (scopeKey !== "global") {
+        const owner = ownerOf(scopeKey);
+        const valid =
+          owner.kind === "worktree" && owner.projectId && owner.environmentId
+            ? await worktreeScope(owner.projectId, owner.environmentId)
+            : (await listScopes()).find(
+                (scope) => scope.kind === "project" && scope.key === scopeKey,
+              );
+        if (!valid) throw new Error("That owner is no longer available.");
+      }
+      const initial = (await readStoredTabs()).find(
+        (entry) => entry.terminalId === terminalId,
+      );
+      if (!initial) throw new Error("That tab is no longer open.");
+      const launchScopeKey = initial.launchScopeKey ?? initial.scopeKey;
+      const hostId =
+        initial.hostId ?? (await bb.sdk.terminals.get({ terminalId })).hostId;
+      return serialize(async () => {
+        const stored = await readStoredTabs();
+        const entry = stored.find((item) => item.terminalId === terminalId);
+        if (!entry) throw new Error("That tab is no longer open.");
+        entry.launchScopeKey = launchScopeKey;
+        entry.hostId = hostId;
+        entry.scopeKey = scopeKey === "global" ? `home:${hostId}` : scopeKey;
+        await bb.storage.kv.set(TABS_KEY, stored);
+        const known = lastKnownTabs.get(terminalId);
+        if (known)
+          lastKnownTabs.set(terminalId, { ...known, scopeKey: entry.scopeKey });
+        await bumpRevision();
+        return { snapshot: await snapshot() };
       });
     },
 
@@ -871,18 +1003,8 @@ export default async function plugin(bb: BbPluginApi) {
 
     async closeTab({ terminalId }) {
       await requireOwnedTab(terminalId);
-      // Best-effort, outside the mutex: waiting under it for a slow host to
-      // confirm the close blocked every other handler for the full timeout.
-      try {
-        await withTimeout(
-          bb.sdk.terminals.close({ terminalId, mode: "force" }),
-          SDK_TIMEOUT_MS,
-          "terminals.close",
-        );
-      } catch {
-        // Already gone (or the host is slow to confirm); removing the tab
-        // is still the right outcome.
-      }
+      // Never discard the ownership record until the host confirms termination.
+      await terminateOwned(terminalId);
       return serialize(async () => {
         const remaining = (await readStoredTabs()).filter(
           (entry) => entry.terminalId !== terminalId,
@@ -908,52 +1030,41 @@ export default async function plugin(bb: BbPluginApi) {
     },
 
     async renameTab({ terminalId, title }) {
-      // The rename round trip happens before taking the mutex; it touches no
-      // plugin state, and a concurrent close simply makes it fail like a
-      // dead session always could.
-      const stored = await readStoredTabs();
-      const entry = stored.find((tab) => tab.terminalId === terminalId);
-      // Renaming a tab this window does not own would let a stale client
-      // rename somebody else's session out from under them.
-      if (entry === undefined) {
-        return serialize(async () => ({ snapshot: await snapshot() }));
-      }
-
-      // Null means "go back to the name the tab was opened with", which is
-      // what the tab strip falls back to showing.
-      const scope = (await listScopes()).find(
-        (item) => item.key === (entry.launchScopeKey ?? entry.scopeKey),
-      );
-      const restored =
-        scope === undefined ? null : defaultTitle(scope.label, scope.hostName);
-      const next = title ?? restored;
-      if (next === null) {
-        return serialize(async () => ({ snapshot: await snapshot() }));
-      }
-
-      try {
-        await withTimeout(
-          bb.sdk.terminals.rename({ terminalId, title: next }),
-          SDK_TIMEOUT_MS,
-          "terminals.rename",
-        );
-      } catch {
-        // A name is not worth failing a turn over; the next snapshot still
-        // carries whatever the session actually holds.
-        return serialize(async () => ({ snapshot: await snapshot() }));
-      }
       return serialize(async () => {
+        const stored = await readStoredTabs();
+        const entry = stored.find((item) => item.terminalId === terminalId);
+        if (!entry) return { snapshot: await snapshot() };
         const known = lastKnownTabs.get(terminalId);
-        if (known !== undefined) {
+        const shell = title?.match(/^bb-fg:shell:([a-zA-Z0-9_.+-]+)$/)?.[1];
+        const command = title?.startsWith("bb-fg:command:")
+          ? normalizeTerminalTitle(title.slice(14).split("/").pop() ?? "")
+          : undefined;
+        if (shell) entry.shellName = shell;
+        const launchKey = entry.launchScopeKey ?? entry.scopeKey;
+        const scope =
+          (await listScopes()).find((scope) => scope.key === launchKey) ??
+          worktreeScopes.get(launchKey);
+        entry.autoTitle =
+          shell || title === null
+            ? null
+            : command !== undefined
+              ? command
+              : meaningfulShellTitle(title, {
+                  label: scope?.label ?? "Shell",
+                  defaultTitle: defaultTitle(
+                    scope?.label ?? "Shell",
+                    scope?.hostName ?? "",
+                  ),
+                  cwd: known?.cwd ?? "",
+                });
+        await bb.storage.kv.set(TABS_KEY, stored);
+        if (known)
           lastKnownTabs.set(terminalId, {
             ...known,
-            shellTitle: meaningfulShellTitle(next, {
-              label: known.label,
-              defaultTitle: defaultTitle(known.label, known.hostName),
-              cwd: known.cwd,
-            }),
+            label: entry.shellName ?? known.label,
+            shellTitle: entry.autoTitle,
+            customTitle: entry.name ?? null,
           });
-        }
         await bumpRevision();
         return { snapshot: await snapshot() };
       });
@@ -969,15 +1080,7 @@ export default async function plugin(bb: BbPluginApi) {
       if (found === undefined) throw new Error("That tab is no longer open.");
 
       const scope = await requireScope(found.launchScopeKey ?? found.scopeKey);
-      try {
-        await withTimeout(
-          bb.sdk.terminals.close({ terminalId, mode: "force" }),
-          SDK_TIMEOUT_MS,
-          "terminals.close",
-        );
-      } catch {
-        // Already dead — that is why we are restarting.
-      }
+      await terminateOwned(terminalId);
 
       const restarted = await createSession(scope, cols, rows);
       return serialize(async () => {
@@ -1001,7 +1104,13 @@ export default async function plugin(bb: BbPluginApi) {
         // Replace in place so the tab keeps its position in the strip.
         // Promotion may have completed while the replacement PTY was starting.
         restarted.scopeKey = stored[index]!.scopeKey;
-        stored[index] = { ...stored[index]!, terminalId: restarted.terminalId };
+        restarted.customTitle = stored[index]!.name ?? null;
+        restarted.label = stored[index]!.shellName ?? "Shell";
+        stored[index] = {
+          ...stored[index]!,
+          terminalId: restarted.terminalId,
+          autoTitle: null,
+        };
         await bb.storage.kv.set(TABS_KEY, stored);
         const storedActive = await bb.storage.kv.get<string>(ACTIVE_TAB_KEY);
         if (storedActive === terminalId) {
@@ -1054,7 +1163,7 @@ export default async function plugin(bb: BbPluginApi) {
         );
         rememberStatus(terminalId, session.status, session.exitCode);
         if (!isLiveStatus(session.status)) {
-          // The next snapshot must see this die and prune the tab.
+          // The next snapshot refreshes the exited state for restart/delete.
           lastVerifiedAt = 0;
         }
         return {
@@ -1074,17 +1183,29 @@ export default async function plugin(bb: BbPluginApi) {
             exitCode: null,
           };
         }
-        // The session was closed out from under us. Report it instead of
-        // throwing so the window can offer a restart.
-        rememberStatus(terminalId, "gone", null);
-        lastVerifiedAt = 0;
-        return {
-          chunks: [],
-          nextSeq: sinceSeq,
-          truncated: false,
-          status: "gone",
-          exitCode: null,
-        };
+        // BB rejects output reads after process exit. Verify the lifecycle state
+        // so Enter-to-restart still works, without calling a network error death.
+        try {
+          const session = await withTimeout(
+            bb.sdk.terminals.get({ terminalId }),
+            SDK_TIMEOUT_MS,
+            "terminals.get",
+          );
+          if (!isLiveStatus(session.status)) {
+            rememberStatus(terminalId, session.status, session.exitCode);
+            lastVerifiedAt = 0;
+            return {
+              chunks: [],
+              nextSeq: sinceSeq,
+              truncated: false,
+              status: session.status,
+              exitCode: session.exitCode,
+            };
+          }
+        } catch {
+          // No authoritative exit state: retain the shell and allow retry.
+        }
+        throw error; // Let the renderer show a recoverable transport error.
       }
     },
 

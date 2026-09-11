@@ -11,8 +11,15 @@ const GENERIC_MONO =
  */
 const BUNDLED_SYMBOLS = '"BB FG Nerd Symbols"';
 
+/** Matches BB's ThreadTerminalPanel. The public SDK exposes no terminal-font
+ * setting; keep this host default in one place rather than a plugin override.
+ */
+export const BB_TERMINAL_FONT_SIZE = 12;
+
 export function resolveMonoFont(scope: HTMLElement): string {
-  const declared = getComputedStyle(scope).getPropertyValue("--font-mono").trim();
+  const declared = getComputedStyle(scope)
+    .getPropertyValue("--font-mono")
+    .trim();
   // Ghostty applies this as a literal font-family, so an unresolved var() would
   // invalidate the whole declaration rather than falling through the list.
   const host = declared === "" || declared.includes("var(") ? null : declared;

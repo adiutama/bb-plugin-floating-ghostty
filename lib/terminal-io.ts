@@ -70,8 +70,8 @@ function isPathLike(path: string): boolean {
  * echoing the path back would replace a useful label with a redundant one.
  */
 export function normalizeTerminalTitle(title: string): string | null {
-  const trimmed = title.trim();
-  if (trimmed === "") return null;
+  const trimmed = title.replace(/[\x00-\x1f\x7f]/g, "").trim();
+  if (trimmed === "" || isPathLike(trimmed)) return null;
   const path = SHELL_PATH_TITLE.exec(trimmed)?.[1]?.trimStart();
   if (path !== undefined && path !== "" && isPathLike(path)) return null;
   return trimmed.slice(0, TITLE_MAX_LENGTH);
@@ -89,14 +89,22 @@ export function normalizeTerminalTitle(title: string): string | null {
  */
 export function meaningfulShellTitle(
   title: string,
-  { label, defaultTitle, cwd }: { label: string; defaultTitle: string; cwd: string },
+  {
+    label,
+    defaultTitle,
+    cwd,
+  }: { label: string; defaultTitle: string; cwd: string },
 ): string | null {
   const normalized = normalizeTerminalTitle(title);
   if (normalized === null || normalized === defaultTitle) return null;
 
   // `dir`, `dir:branch`, `dir — anything`: judge it by what comes first.
   const head = normalized.split(/[:—]/u)[0]!.trim();
-  const base = cwd.split("/").filter((part) => part !== "").pop() ?? cwd;
+  const base =
+    cwd
+      .split("/")
+      .filter((part) => part !== "")
+      .pop() ?? cwd;
   if (head === base || head === label || head === "") return null;
   return normalized;
 }

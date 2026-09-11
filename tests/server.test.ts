@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createFakePluginHost,
   experimental_scanPublicSdkOnly,
@@ -8,6 +8,7 @@ import plugin from "../server";
 
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => {
+  vi.restoreAllMocks();
   for (const cleanup of cleanups.splice(0)) await cleanup();
 });
 async function setup(settings: Record<string, boolean> = {}) {
@@ -63,6 +64,10 @@ async function setup(settings: Record<string, boolean> = {}) {
 }
 
 describe("Floating Ghostty backend", () => {
+  it("matches BB's native terminal font size", async () => {
+    const { call } = await setup();
+    expect(((await call("init", null)) as any).prefs.fontSize).toBe(12);
+  });
   it("keeps both shells when tabs are opened concurrently", async () => {
     const { open, call, sessions } = await setup();
     await Promise.all([open(), open()]);
@@ -371,4 +376,171 @@ it("promotes ownership without replacing the process and preserves its launch co
   expect(sdk.callsTo("terminals.create")[0]?.[0]).toMatchObject({
     scope: { kind: "environment", environmentId: "one" },
   });
+});
+
+it("verifies exit after output becomes unavailable without treating a transport failure as exit", async () => {
+  const { open, call, harness, sessions } = await setup();
+  const { opened } = await open();
+  harness.inspection.sdk.stub("terminals.output", async () => {
+    throw new Error("output unavailable");
+  });
+  await expect(
+    call("read", { terminalId: opened.terminalId, sinceSeq: 7 }),
+  ).rejects.toThrow("output unavailable");
+  sessions.get(opened.terminalId)!.status = "exited";
+  sessions.get(opened.terminalId)!.exitCode = 3;
+  await expect(
+    call("read", { terminalId: opened.terminalId, sinceSeq: 7 }),
+  ).resolves.toMatchObject({
+    chunks: [],
+    nextSeq: 7,
+    status: "exited",
+    exitCode: 3,
+  });
+  expect(((await call("init", null)) as any).snapshot.tabs).toHaveLength(1);
+});
+
+it("separates pinned names from automatic shell/command titles and persists both across reload", async () => {
+  const { call, open, harness, sessions } = await setup();
+  const { opened } = await open();
+  const id = opened.terminalId;
+  await call("renameTab", { terminalId: id, title: "bb-fg:shell:zsh" });
+  await call("setTabName", { terminalId: id, name: "Dev server" });
+  let result = (await call("renameTab", {
+    terminalId: id,
+    title: "bb-fg:command:npm",
+  })) as any;
+  expect(result.snapshot.tabs[0]).toMatchObject({
+    label: "zsh",
+    shellTitle: "npm",
+    customTitle: "Dev server",
+  });
+  const reloaded = await harness.lifecycle.reload(plugin);
+  cleanups.push(() => reloaded.harness.lifecycle.dispose());
+  reloaded.harness.inspection.sdk.stub("hosts.list", async () => [
+    { id: "local", name: "Local", status: "connected" },
+  ]);
+  reloaded.harness.inspection.sdk.stub("projects.list", async () => []);
+  reloaded.harness.inspection.sdk.stub("terminals.get", async () =>
+    sessions.get(id),
+  );
+  result = (await reloaded.harness.behavior.callRpc("init", null)) as any;
+  expect(result.snapshot.tabs[0]).toMatchObject({
+    label: "zsh",
+    shellTitle: "npm",
+    customTitle: "Dev server",
+  });
+  result = (await reloaded.harness.behavior.callRpc("setTabName", {
+    terminalId: id,
+    name: null,
+  })) as any;
+  expect(result.snapshot.tabs[0]).toMatchObject({
+    label: "zsh",
+    shellTitle: "npm",
+    customTitle: null,
+  });
+  result = (await reloaded.harness.behavior.callRpc("renameTab", {
+    terminalId: id,
+    title: "bb-fg:shell:zsh",
+  })) as any;
+  expect(result.snapshot.tabs[0]).toMatchObject({
+    label: "zsh",
+    shellTitle: null,
+    customTitle: null,
+  });
+  await expect(
+    call("setTabName", { terminalId: "foreign", name: "Name" }),
+  ).rejects.toThrow();
+});
+
+it("narrows ownership to a project or worktree without changing the original restart destination", async () => {
+  const { call, open, harness } = await setup();
+  harness.inspection.sdk.stub("projects.list", async () => [
+    {
+      id: "A",
+      name: "A",
+      sources: [{ hostId: "local", path: "/a", isDefault: true }],
+    },
+  ]);
+  harness.inspection.sdk.stub("environments.get", async () => ({
+    id: "one",
+    projectId: "A",
+    name: "feature",
+    path: "/a/feature",
+    hostId: "local",
+    status: "ready",
+  }));
+  const { opened } = await open();
+  let result = (await call("setTabOwner", {
+    terminalId: opened.terminalId,
+    scopeKey: "project:A",
+  })) as any;
+  expect(result.snapshot.tabs[0].scopeKey).toBe("project:A");
+  result = (await call("setTabOwner", {
+    terminalId: opened.terminalId,
+    scopeKey: "worktree:A:one",
+  })) as any;
+  expect(result.snapshot.tabs[0].scopeKey).toBe("worktree:A:one");
+  await expect(
+    call("setTabOwner", {
+      terminalId: opened.terminalId,
+      scopeKey: "worktree:B:one",
+    }),
+  ).rejects.toThrow();
+  expect(harness.inspection.sdk.callsTo("terminals.create")).toHaveLength(1);
+  const { restarted } = (await call("restartTab", {
+    terminalId: opened.terminalId,
+    cols: 80,
+    rows: 24,
+  })) as any;
+  expect(restarted.scopeKey).toBe("worktree:A:one");
+  expect(
+    harness.inspection.sdk.callsTo("terminals.create")[1]?.[0],
+  ).toMatchObject({ scope: { kind: "host_path", hostId: "local", cwd: null } });
+});
+
+it("retains a live terminal when deletion or restart fails", async () => {
+  const { call, open, harness, sessions } = await setup();
+  const { opened } = await open();
+  harness.inspection.sdk.stub("terminals.close", async () => {
+    throw new Error("Host unavailable");
+  });
+  harness.inspection.sdk.stub("terminals.list", async () => ({
+    sessions: [...sessions.values()],
+  }));
+  await expect(
+    call("closeTab", { terminalId: opened.terminalId }),
+  ).rejects.toThrow("Host unavailable");
+  await expect(
+    call("restartTab", { terminalId: opened.terminalId, cols: 80, rows: 24 }),
+  ).rejects.toThrow("Host unavailable");
+  expect(((await call("init", null)) as any).snapshot.tabs).toHaveLength(1);
+  expect(harness.inspection.sdk.callsTo("terminals.create")).toHaveLength(1);
+});
+
+it("retains metadata on transient inspection errors and only deletes after authoritative absence", async () => {
+  const { call, open, harness, sessions } = await setup();
+  const { opened } = await open();
+  await call("setTabName", { terminalId: opened.terminalId, name: "Keep me" });
+  harness.inspection.sdk.stub("terminals.get", async () => {
+    throw new Error("Connection reset");
+  });
+  harness.inspection.sdk.stub("terminals.list", async () => {
+    throw new Error("Connection reset");
+  });
+  const now = Date.now();
+  vi.spyOn(Date, "now").mockReturnValue(now + 60000);
+  expect(((await call("init", null)) as any).snapshot.tabs[0]).toMatchObject({
+    terminalId: opened.terminalId,
+    customTitle: "Keep me",
+  });
+  sessions.delete(opened.terminalId);
+  harness.inspection.sdk.stub("terminals.close", async () => {
+    throw new Error("Missing");
+  });
+  harness.inspection.sdk.stub("terminals.list", async () => ({ sessions: [] }));
+  expect(
+    ((await call("closeTab", { terminalId: opened.terminalId })) as any)
+      .snapshot.tabs,
+  ).toEqual([]);
 });
