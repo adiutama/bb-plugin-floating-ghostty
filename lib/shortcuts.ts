@@ -38,7 +38,7 @@ export function isSwitcherShortcut(
   return matchesShortcut(
     event,
     {
-      key: "p",
+      key: "k",
       mod: true,
       meta: false,
       control: false,

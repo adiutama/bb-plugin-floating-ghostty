@@ -15,6 +15,7 @@ import { Icon } from "@/components/ui/icon";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { useIsCompactViewport } from "@/components/ui/hooks/use-compact-viewport";
 import { TerminalSwitcher } from "./terminal-switcher";
+import { TerminalManagement, type ManagementMode } from "./terminal-management";
 import { TerminalHeader } from "./terminal-header";
 import type { ScopeOption } from "@/lib/scopes";
 import { FindBar } from "@/components/find-bar";
@@ -27,7 +28,6 @@ import {
   preferredTerminal,
   readSelection,
   rememberSelection,
-  scopeLabel,
   type TerminalContext,
 } from "../lib/context";
 import {
@@ -39,6 +39,8 @@ import {
 import { TerminalView } from "@/components/terminal-view";
 import { isolateTerminalKey } from "../lib/keyboard";
 import { nativeLauncherOverride } from "../lib/native-launcher";
+import { BB_TERMINAL_FONT_SIZE } from "../lib/theme";
+import { useSwitcherTitles } from "../lib/use-switcher-titles";
 import { windowController } from "@/lib/controller";
 import {
   clampFrame,
@@ -115,8 +117,10 @@ export function FloatingTerminal({
   const [terminalContext, setTerminalContext] =
     useState<TerminalContext>(globalContext);
   const [activeId, setActiveId] = useState<string | null>(null);
-  const [mode, setMode] = useState<"shell" | "switch">("shell");
-  const [actionsOpen, setActionsOpen] = useState(false);
+  const [mode, setMode] = useState<"shell" | "switch" | ManagementMode>(
+    "shell",
+  );
+  const [managedId, setManagedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [creating, setCreating] = useState(false);
   const creatingRef = useRef(false);
@@ -136,7 +140,7 @@ export function FloatingTerminal({
   const shortcutEnabled = liveSettings?.shortcutEnabled !== false;
   const overrideNativeShortcut = liveSettings?.overrideNativeShortcut === true;
   const [nativeShortcuts, setNativeShortcuts] = useState<Shortcut[]>([]);
-  const [fontSize, setFontSize] = useState(13);
+  const [fontSize, setFontSize] = useState(BB_TERMINAL_FONT_SIZE);
   const [themeVersion, setThemeVersion] = useState(0);
   const [fitVersion, setFitVersion] = useState(0);
   /**
@@ -361,50 +365,44 @@ export function FloatingTerminal({
       return;
     }
     setFindOpen(false);
-    setMode("shell");
     void openTab(scope.key);
   };
 
-  const promoteTab = async (target: "project" | "global") => {
-    if (!activeId) return;
-    try {
-      const result = await rpc.call("promoteTab", {
-        terminalId: activeId,
-        target,
-      });
-      dispatch({ type: "synced", snapshot: result.snapshot });
-    } catch (error) {
-      toast.error(
-        error instanceof Error ? error.message : "Could not promote terminal",
-      );
-    }
+  const changeName = async (name: string | null) => {
+    if (!managedId) return;
+    const result = await rpc.call("setTabName", {
+      terminalId: managedId,
+      name,
+    });
+    dispatch({ type: "synced", snapshot: result.snapshot });
+  };
+  const changeOwner = async (scopeKey: string) => {
+    if (!managedId) return;
+    const result = await rpc.call("setTabOwner", {
+      terminalId: managedId,
+      scopeKey,
+    });
+    dispatch({ type: "synced", snapshot: result.snapshot });
   };
 
   const closeTab = useCallback(
     async (terminalId: string) => {
-      try {
-        const result = await rpc.call("closeTab", { terminalId });
-        dispatch({ type: "synced", snapshot: result.snapshot });
-        if (activeIdRef.current === terminalId) {
-          const memory = readSelection();
-          const next = preferredTerminal(
-            result.snapshot.tabs,
-            contextRef.current,
-            undefined,
-            memory.recent,
-          );
-          setActiveId(next?.terminalId ?? null);
-          if (next) rememberSelection(contextRef.current, next.terminalId);
-          else windowController.hide();
-        }
-      } catch (error) {
-        toast.error(
-          error instanceof Error ? error.message : "Could not close the shell",
+      const result = await rpc.call("closeTab", { terminalId });
+      dispatch({ type: "synced", snapshot: result.snapshot });
+      if (activeIdRef.current === terminalId) {
+        const memory = readSelection();
+        const next = preferredTerminal(
+          result.snapshot.tabs,
+          contextRef.current,
+          undefined,
+          memory.recent,
         );
-        void sync();
+        setActiveId(next?.terminalId ?? null);
+        if (next) rememberSelection(contextRef.current, next.terminalId);
+        else windowController.hide();
       }
     },
-    [rpc, sync],
+    [rpc],
   );
 
   const restartTab = useCallback(
@@ -420,9 +418,15 @@ export function FloatingTerminal({
         dispatch({
           type: "synced",
           snapshot: result.snapshot,
-          focusId: result.restarted.terminalId,
+          focusId:
+            activeIdRef.current === terminalId
+              ? result.restarted.terminalId
+              : undefined,
         });
-        if (version === requestVersion.current) {
+        if (
+          version === requestVersion.current &&
+          activeIdRef.current === terminalId
+        ) {
           setActiveId(result.restarted.terminalId);
           rememberSelection(contextRef.current, result.restarted.terminalId);
         }
@@ -488,7 +492,7 @@ export function FloatingTerminal({
     if (!open) {
       requestVersion.current++;
       setMode("shell");
-      setActionsOpen(false);
+      setManagedId(null);
       setFindOpen(false);
       return;
     }
@@ -707,20 +711,13 @@ export function FloatingTerminal({
   ]);
 
   useEffect(() => {
-    if (
-      open &&
-      mode === "shell" &&
-      !actionsOpen &&
-      !findOpen &&
-      !loading &&
-      activeId
-    ) {
+    if (open && mode === "shell" && !findOpen && !loading && activeId) {
       const raf = window.requestAnimationFrame(() =>
         pumps.current.get(activeId)?.focus(),
       );
       return () => window.cancelAnimationFrame(raf);
     }
-  }, [open, mode, actionsOpen, findOpen, loading, activeId]);
+  }, [open, mode, findOpen, loading, activeId]);
 
   // --------------------------------------------------------------- render
 
@@ -766,7 +763,9 @@ export function FloatingTerminal({
               dispatch({ type: "synced", snapshot: result.snapshot }),
             )
             .catch(() => {
-              // A name is cosmetic; let the next snapshot settle it.
+              // Allow a later signal to retry after a transient transport error.
+              if (lastTitles.current.get(terminalId) === title)
+                lastTitles.current.delete(terminalId);
             });
         }, TITLE_RENAME_DEBOUNCE_MS),
       );
@@ -914,9 +913,19 @@ export function FloatingTerminal({
       : [];
   const activeTab =
     availableTabs.find((tab) => tab.terminalId === activeId) ?? null;
+  useSwitcherTitles(
+    rpc,
+    availableTabs
+      .filter((tab) => tab.terminalId !== activeId)
+      .map((tab) => tab.terminalId),
+    open && !loading && mode === "switch",
+    onTitle,
+  );
   const visited = useRef(new Set<string>());
   if (activeTab && !loading) visited.current.add(activeTab.terminalId);
+  const managedTab = availableTabs.find((tab) => tab.terminalId === managedId);
   const dismissPicker = () => setMode("shell");
+  const dismissManagement = () => setMode("switch");
 
   if (!mounted) return null;
 
@@ -938,8 +947,7 @@ export function FloatingTerminal({
         onKeyUp={isolateTerminalKey}
         onKeyPress={isolateTerminalKey}
         role="dialog"
-        // Non-modal on purpose: the point of this window is that bb stays
-        // usable behind it, so it must not read as a focus trap.
+        // The backdrop returns to BB; keyboard navigation stays in terminal mode.
         aria-modal="false"
         aria-label="Floating Ghostty"
         aria-hidden={!open}
@@ -947,7 +955,7 @@ export function FloatingTerminal({
         data-layout={sheet ? "sheet" : "window"}
         // Stacking lives in styles.css, where the backdrop and window are kept in
         // one place relative to bb's own layers.
-        className="bb-fg-window fixed flex flex-col overflow-hidden rounded-xl border border-border bg-card text-card-foreground shadow-2xl"
+        className="bb-fg-window fixed flex flex-col overflow-hidden rounded-xl border bb-fg-surface"
       >
         <div
           ref={headerRef}
@@ -964,36 +972,13 @@ export function FloatingTerminal({
         >
           <TerminalHeader
             tab={activeTab}
-            owner={
-              activeTab
-                ? scopeLabel(activeTab.scopeKey, scopes)
-                : "Floating Ghostty"
-            }
             onSwitch={() => {
               setFindOpen(false);
-              setMode("switch");
+              setMode((value) => (value === "switch" ? "shell" : "switch"));
             }}
-            onCreate={createInContext}
-            onPromote={(target) => void promoteTab(target)}
             onHide={hide}
-            onFind={openFind}
-            onRestart={() => {
-              if (activeId) void restartTab(activeId);
-            }}
-            onEnd={() => {
-              if (activeId) void closeTab(activeId);
-            }}
-            maximize={
-              sheet
-                ? null
-                : {
-                    on: maximized,
-                    toggle: () => setMaximized((value) => !value),
-                  }
-            }
             busy={loading || creating}
-            visible={open}
-            onMenuChange={setActionsOpen}
+            expanded={mode !== "shell"}
           />
         </div>
 
@@ -1012,7 +997,6 @@ export function FloatingTerminal({
                   open &&
                   !loading &&
                   mode === "shell" &&
-                  !actionsOpen &&
                   !findOpen &&
                   activeTab?.terminalId === tab.terminalId
                 }
@@ -1091,12 +1075,53 @@ export function FloatingTerminal({
               </button>
             </div>
           ) : null}
-          {mode === "switch" ? (
+          {(mode === "rename" || mode === "ownership" || mode === "delete") &&
+          managedTab ? (
+            <TerminalManagement
+              key={`${mode}:${managedTab.terminalId}`}
+              mode={mode}
+              tab={managedTab}
+              scopes={scopes}
+              onName={changeName}
+              onOwner={changeOwner}
+              onDelete={() => closeTab(managedTab.terminalId)}
+              onDismiss={dismissManagement}
+            />
+          ) : null}
+          {mode !== "shell" ? (
             <TerminalSwitcher
               tabs={availableTabs}
               scopes={scopes}
               context={terminalContext}
               activeId={activeId}
+              visible={mode === "switch"}
+              busy={loading || creating}
+              creationLabel={
+                preferredScope(scopes, terminalContext)?.label ??
+                "current context"
+              }
+              onCreate={createInContext}
+              onManage={(id, nextMode) => {
+                setManagedId(id);
+                setMode(nextMode);
+              }}
+              onRestart={(id) => void restartTab(id)}
+              onFind={
+                activeTab
+                  ? () => {
+                      setMode("shell");
+                      openFind();
+                    }
+                  : undefined
+              }
+              maximize={
+                sheet
+                  ? null
+                  : {
+                      on: maximized,
+                      toggle: () => setMaximized((value) => !value),
+                    }
+              }
               onSelect={selectTab}
               onDismiss={dismissPicker}
             />

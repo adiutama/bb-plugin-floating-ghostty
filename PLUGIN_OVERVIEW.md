@@ -7,11 +7,18 @@ Open it from the ghost in the sidebar footer or **Ctrl+backtick** and type direc
 into a shell. Press the same shortcut or the **×** to return to BB. Your shells
 keep running, and surviving sessions reattach on reload.
 
-Terminals belong to Global, a Project, or a Worktree. **Cmd/Ctrl+P** opens a flat,
-searchable switcher containing Global plus the current project's terminals,
-including all its worktrees. Filters narrow that list. **+** creates immediately in the current BB context.
-Promote a shell to Project or Global afterward from its actions menu, keeping
-its process and working directory.
+The minimal header shows the ghost, terminal selector, and hide control. All
+session management lives in the selector. Managing a background session keeps
+your current shell selected, and dialogs return to the same search and filter.
+
+Terminals belong to Global, a Project, or a Worktree. **Cmd/Ctrl+K** opens a flat,
+searchable terminal list containing Global plus the current project's terminals,
+including all its worktrees. Filters narrow that list. Its compact rows follow
+BB’s thread search, with the name above ownership and machine metadata. **+ New**
+beside the filter creates immediately in the current BB context.
+Change its ownership afterward from that session’s **⋯** menu in the selector,
+keeping its process and working directory. The menu also lets you rename or delete a terminal. Names
+automatically follow the shell and running command unless you pin a custom name.
 
 The centered window remembers its position, supports maximize and restore, and
 becomes fullscreen on smaller screens, adjusting for the software keyboard.

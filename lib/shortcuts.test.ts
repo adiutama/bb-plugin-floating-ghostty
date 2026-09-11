@@ -68,8 +68,25 @@ it("resolves the host's platform modifier exactly", () => {
   ).toBe(false);
   expect(
     isSwitcherShortcut(
-      new KeyboardEvent("keydown", { key: "p", metaKey: true }),
+      new KeyboardEvent("keydown", { key: "k", metaKey: true }),
       true,
     ),
   ).toBe(true);
 });
+
+it.each([
+  [true, { key: "k", metaKey: true }, true],
+  [false, { key: "k", ctrlKey: true }, true],
+  [true, { key: "p", metaKey: true }, false],
+  [false, { key: "p", ctrlKey: true }, false],
+  [true, { key: "k", ctrlKey: true }, false],
+  [true, { key: "k", metaKey: true, shiftKey: true }, false],
+  [true, { key: "k", metaKey: true, altKey: true }, false],
+] as const)(
+  "matches terminal search with the exact platform shortcut (%s, %j)",
+  (mac, init, expected) => {
+    expect(isSwitcherShortcut(new KeyboardEvent("keydown", init), mac)).toBe(
+      expected,
+    );
+  },
+);

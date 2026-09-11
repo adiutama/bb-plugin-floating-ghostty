@@ -4,7 +4,8 @@ A little ghost for your shells. **Floating Ghostty** combines a draggable BB
 terminal window with Ghostty's terminal engine through Wterm.
 
 Open the ghost button in BB's sidebar footer, or press **Ctrl+backtick**.
-The overlay goes straight to a shell, ready to type. Press the same shortcut,
+Terminal mode opens straight into a shell, ready to type. Its quiet header holds
+only the ghost, current terminal selector, and hide control. Press the same shortcut,
 use the **×**, or click outside to return to BB. Your shells keep running.
 
 ## Context and terminal selection
@@ -23,24 +24,54 @@ Changing directory inside a shell does not change its owner.
 - Navigating to another thread or project hides the overlay. Threads sharing an
   environment share its worktree terminals.
 
-**Cmd+P** (Ctrl+P on other platforms) opens the terminal switcher. It is a flat,
+**Cmd+K** (Ctrl+K on other platforms) opens the terminal switcher. It is a flat,
 searchable list. The **All** filter includes Global plus the current project and its worktrees;
-use the filter beside search to narrow it to Global, Project, or one worktree. Enter switches and
+use the filter above the results to narrow it to Global, Project, or one worktree. Enter switches and
 focuses the shell; Escape returns to the existing shell. These keys belong to the
-switcher only while it is open; Cmd/Ctrl+P is reserved while the terminal overlay
+switcher only while it is open; Cmd/Ctrl+K is reserved while the terminal overlay
 is open.
 
-**Tab / Shift+Tab** cycles between search and category; arrow keys change the
-category. Terminal mode contains keyboard input, including its portaled actions
+The selector follows BB’s **thread search** layout: one search field, terminal
+names on the first line, and ownership/machine metadata underneath. Recently used
+terminals come first, and matching title text is highlighted. Search always finds
+terminals, including names starting with **>**.
+
+Session **⋯** actions appear on hover or keyboard selection and stay visible on
+touch screens. Find is in the current session’s menu; Maximize/Restore is in the
+session menus. **+ New** sits beside the scope filter above the results.
+
+**Tab / Shift+Tab** cycles through search, category, New, and the highlighted
+session's actions. Arrow keys navigate sessions or change the
+focused category. Escape closes a session menu first, then the selector; in the
+shell it remains a terminal key. Terminal mode contains keyboard input, including its portaled actions
 menu, so it does not reach BB's in-app shortcuts. Typing, shell control keys,
 copy/paste, terminal search, and the toggle continue to work. OS-reserved shortcuts
 and native application-menu commands remain controlled by BB/the operating system.
 
-The **+** action immediately starts a shell in the current BB context: Worktree,
+The selector’s **+ New** action immediately starts a shell in the current BB context: Worktree,
 then Project, then Global. There is no creation form, and the selected terminal
 or switcher filter does not change the destination. After creation, use
-**Terminal actions → Promote to Project / Global** to widen its ownership.
-Promotion keeps the running process, directory, and original restart destination.
+**Selector → session ⋯ → Change ownership…** to move it between Global, the current
+project, and its worktrees. This keeps the running process, directory, and original
+restart destination. A terminal moved outside the current context disappears from
+that context's list.
+
+Each session’s **⋯** menu provides **Rename…**, **Restart shell**, and
+**Delete terminal…**. Managing another session leaves your current shell selected.
+Closing a management dialog returns to the selector with its search and filter
+preserved. Deletion asks for
+confirmation and stops the shell and its running commands. A connection failure
+keeps the terminal listed so you can retry.
+
+New shells initially say **Shell**, then adopt their shell name, such as **zsh**.
+Session-local zsh, bash, and fish hooks report the command executable while it runs
+and restore the shell name at the prompt. Applications can also supply OSC titles.
+A custom name stays pinned; clear it in Rename to resume automatic naming.
+The open switcher refreshes inactive terminals' names every two seconds. When the
+overlay is hidden, polling stops and titles catch up when you return.
+Existing shells keep running; restart one to enable the new hooks. Other shells
+use their native title signals. These hooks do not edit your startup files; an
+existing bash DEBUG trap is preserved and may limit automatic command reporting.
 
 ## Features
 
@@ -51,7 +82,9 @@ Promotion keeps the running process, directory, and original restart destination
 - Scrollback search with Cmd/Ctrl+F; Enter and Shift+Enter navigate matches.
   Search is case-insensitive, single-line, and capped at 1,000 matches.
 - A keyboard-aware fullscreen surface and extra keys on small screens.
-- Live shortcut settings and configurable font size.
+- Live shortcut settings and typography matching BB's native terminal (12px).
+- Wheel/trackpad history scrolling and alternate-screen app scrolling. Hold Shift
+  while scrolling to bypass an application's mouse reporting and scroll history.
 
 ## Install locally
 
@@ -69,21 +102,23 @@ native configuration file.
 
 ## Controls
 
-| Action             | Control                                                   |
-| ------------------ | --------------------------------------------------------- |
-| Show / hide        | Ghost button or Ctrl+backtick                             |
-| Switch terminal    | Click the terminal title or Cmd/Ctrl+P                    |
-| Filter terminals   | Filter beside search                                      |
-| New shell          | **+** (current BB context)                                |
-| Back to BB         | **×**, toggle shortcut, or click outside                  |
-| Move / resize      | Drag the header / an edge or corner                       |
-| Maximize / restore | Terminal actions menu, or double-click empty header space |
-| End a shell        | Terminal actions → End terminal                           |
-| Restart            | Terminal actions → Restart shell; Enter after shell exit  |
-| Find               | Cmd/Ctrl+F inside the terminal                            |
-| Jump to new output | **Latest** while viewing history                          |
+| Action             | Control                                                      |
+| ------------------ | ------------------------------------------------------------ |
+| Show / hide        | Ghost button or Ctrl+backtick                                |
+| Switch terminal    | Click the terminal title or Cmd/Ctrl+K                       |
+| Filter terminals   | Filter beside search                                         |
+| New shell          | Selector → **+ New** (current BB context)                    |
+| Back to BB         | **×**, toggle shortcut, or click outside                     |
+| Move / resize      | Drag the header / an edge or corner                          |
+| Maximize / restore | Session ⋯ menu, or double-click empty header space           |
+| Rename             | Selector → session ⋯ → Rename…                               |
+| Change owner       | Selector → session ⋯ → Change ownership…                     |
+| Delete a shell     | Selector → session ⋯ → Delete terminal…                      |
+| Restart            | Selector → session ⋯ → Restart shell; Enter after shell exit |
+| Find               | Cmd/Ctrl+F inside the terminal                               |
+| Jump to new output | **Latest** while viewing history                             |
 
-**Hiding preserves shells. End terminal terminates the selected shell.**
+**Hiding preserves shells. Delete terminal terminates the selected shell.**
 Disabling or reloading the plugin detaches its UI; BB still owns the PTYs.
 Sessions survive only as long as their host's PTY service does.
 
@@ -102,9 +137,11 @@ Settings live under **Extensions → Floating Ghostty**:
   on each opening, independently of the centering preference. Defaults are 1100 × 720.
   A viewport smaller than either dimension uses fullscreen, as do BB's compact
   viewports. Fullscreen never overwrites the remembered desktop geometry.
-- **Font size**: applied when the overlay opens.
 
-The frame follows BB's theme; the terminal retains a dark palette. Existing POC
+The terminal matches BB's native 12px monospace rendering and shares the app's zoom.
+There is no separate plugin font-size setting.
+
+The frame and terminal share one dark surface; selector and management controls follow BB's theme. Existing POC
 machine-home sessions become Global and project sessions retain their project
 ownership. Existing processes are preserved.
 
@@ -144,8 +181,13 @@ window was unavailable during this implementation.
 - `components/floating-terminal.tsx` owns the shell/switcher flow, context selection, and window layout.
 - `lib/context.ts` defines project visibility, scope priority, and client selection memory.
 - `components/terminal-switcher.tsx` owns the flat list and filters.
+- `components/terminal-management.tsx` owns naming, ownership, and deletion dialogs.
+- `lib/shell-integration.ts` installs session-local shell title hooks; `lib/terminal-title.ts`
+  reads bounded OSC title signals because the pinned Ghostty adapter lacks title reporting.
 - `lib/pump.ts` connects one Ghostty renderer to one BB PTY. Hidden tabs stop
   polling; replayed terminal queries cannot become shell input.
+- `lib/use-switcher-titles.ts` refreshes inactive titles while the switcher is open,
+  without mounting renderers or sending terminal replies.
 - `lib/ghostty.ts` loads the authenticated WASM and adapts Wterm's Ghostty guards.
 - `server.ts` uses public `bb.sdk.terminals` APIs and plugin-owned KV storage.
   Every terminal operation checks ownership.

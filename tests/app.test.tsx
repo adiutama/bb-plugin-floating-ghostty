@@ -23,6 +23,7 @@ vi.mock("../components/terminal-view", async () => {
           cols: () => 80,
           rows: () => 24,
           clearSearch() {},
+          searchAvailable: () => true,
         });
         return () => onPumpGone(terminalId);
       }, [terminalId]);
@@ -196,21 +197,48 @@ async function setup(
           revision++;
           return { snapshot: snapshot(), opened };
         },
-        promoteTab: (input: unknown) => {
-          const { terminalId, target } = input as {
+        setTabOwner: (input: unknown) => {
+          const { terminalId, scopeKey } = input as {
             terminalId: string;
-            target: string;
+            scopeKey: string;
           };
           tabs = tabs.map((tab) =>
             tab.terminalId === terminalId
               ? {
                   ...tab,
-                  scopeKey: target === "project" ? "project:A" : "home:local",
+                  scopeKey: scopeKey === "global" ? "home:local" : scopeKey,
                 }
               : tab,
           );
           revision++;
           return { snapshot: snapshot() };
+        },
+        setTabName: (input: unknown) => {
+          const { terminalId, name } = input as {
+            terminalId: string;
+            name: string | null;
+          };
+          tabs = tabs.map((tab) =>
+            tab.terminalId === terminalId ? { ...tab, customTitle: name } : tab,
+          );
+          revision++;
+          return { snapshot: snapshot() };
+        },
+        closeTab: (input: unknown) => {
+          tabs = tabs.filter(
+            (tab) =>
+              tab.terminalId !== (input as { terminalId: string }).terminalId,
+          );
+          revision++;
+          return { snapshot: snapshot() };
+        },
+        restartTab: (input: unknown) => {
+          const restarted = tabs.find(
+            (tab) =>
+              tab.terminalId === (input as { terminalId: string }).terminalId,
+          )!;
+          revision++;
+          return { snapshot: snapshot(), restarted };
         },
         setActiveTab: () => ({ ok: true }),
         terminalShortcuts: () => [
@@ -235,7 +263,7 @@ function toggle(target: Element | Window = window) {
   fireEvent.keyDown(target, { key: "`", code: "Backquote", ctrlKey: true });
 }
 function switcher(target: Element | Window = window) {
-  fireEvent.keyDown(target, { key: "p", metaKey: true });
+  fireEvent.keyDown(target, { key: "k", metaKey: true });
 }
 
 it("opens directly into a newly created worktree shell, and toggles back without ending it", async () => {
@@ -247,7 +275,7 @@ it("opens directly into a newly created worktree shell, and toggles back without
     await act(async () => toggle(prompt));
     const shell = await slot.findByRole("textbox", { name: "Shell created-1" });
     await waitFor(() => expect(document.activeElement).toBe(shell));
-    expect(slot.queryByPlaceholderText("Search…")).toBeNull();
+    expect(slot.queryByPlaceholderText("Search terminals")).toBeNull();
     expect(
       slot.inspection.rpcCalls.find((call) => call.method === "openTab")?.input,
     ).toMatchObject({ scopeKey: "worktree:A:one" });
@@ -280,8 +308,8 @@ it("keeps the switcher flat and project-bounded, filters without changing the sh
     const shell = await slot.findByRole("textbox", { name: "Shell current" });
     await waitFor(() => expect(document.activeElement).toBe(shell));
     await act(async () => switcher(shell));
-    const search = slot.getByPlaceholderText("Search…");
-    expect(document.activeElement).toBe(search);
+    const search = slot.getByPlaceholderText("Search terminals");
+    await waitFor(() => expect(document.activeElement).toBe(search));
     expect(
       slot
         .getAllByRole("option")
@@ -297,12 +325,24 @@ it("keeps the switcher flat and project-bounded, filters without changing the sh
       slot.getByRole("dialog", { name: "Switch terminal" }),
     ).not.toBeNull();
     fireEvent.change(category, { target: { value: "global" } });
+    await waitFor(() =>
+      expect(
+        slot.getByRole("button", { name: "Actions for global" }).tabIndex,
+      ).toBe(0),
+    );
     fireEvent.keyDown(category, { key: "Tab" });
-    expect(document.activeElement).toBe(search);
-    fireEvent.keyDown(search, { key: "Tab", shiftKey: true });
+    const create = slot.getByRole("button", { name: "New terminal" });
+    expect(document.activeElement).toBe(create);
+    fireEvent.keyDown(create, { key: "Tab" });
+    expect(document.activeElement).toBe(
+      slot.getByRole("button", { name: "Actions for global" }),
+    );
+    fireEvent.keyDown(document.activeElement!, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(create);
+    fireEvent.keyDown(create, { key: "Tab", shiftKey: true });
     expect(document.activeElement).toBe(category);
     fireEvent.keyDown(category, { key: "Tab", shiftKey: true });
-    expect(document.activeElement).toBe(search);
+    await waitFor(() => expect(document.activeElement).toBe(search));
     expect(slot.queryByRole("option", { name: /sibling/ })).toBeNull();
     fireEvent.keyDown(search, { key: "Escape" });
     await waitFor(() => expect(document.activeElement).toBe(shell));
@@ -358,7 +398,7 @@ it("leaves BB's native shortcut alone by default and supports opt-in toggling fr
     await act(async () => toggle());
     expect(windowController.isOpen()).toBe(true);
     await act(async () => switcher());
-    const search = slot.getByPlaceholderText("Search…");
+    const search = slot.getByPlaceholderText("Search terminals");
     await act(async () =>
       fireEvent.keyDown(search, {
         key: "Enter",
@@ -515,6 +555,7 @@ it("creates immediately in the current context even while viewing a sibling shel
     await slot.findByRole("textbox", { name: "Shell current" });
     await act(async () => switcher());
     fireEvent.click(slot.getByRole("option", { name: /sibling/ }));
+    await act(async () => switcher());
     fireEvent.click(slot.getByRole("button", { name: "New terminal" }));
     expect(slot.queryByRole("dialog", { name: "New terminal" })).toBeNull();
     const shell = await slot.findByRole("textbox", { name: "Shell created-1" });
@@ -529,14 +570,13 @@ it("creates immediately in the current context even while viewing a sibling shel
   }
 });
 
-it("promotes an existing shell from the actions menu and makes it available in another project", async () => {
+it("changes ownership from the actions menu and makes it available in another project", async () => {
   const slot = await setup([tab("current", "worktree:A:one")]);
   try {
     await act(async () => toggle());
     const shell = await slot.findByRole("textbox", { name: "Shell current" });
-    const actions = slot.container.querySelector(
-      '[aria-label="Terminal actions"]',
-    )!;
+    await act(async () => switcher());
+    const actions = slot.getByRole("button", { name: "Actions for current" });
     await act(async () => {
       fireEvent.keyDown(actions, { key: "Enter" });
     });
@@ -544,25 +584,35 @@ it("promotes an existing shell from the actions menu and makes it available in a
     const hostKey = vi.fn();
     document.addEventListener("keydown", hostKey);
     try {
-      fireEvent.keyDown(menu.getByText("Promote to Project"), {
-        key: "k",
+      fireEvent.keyDown(menu.getByText("Change ownership…"), {
+        key: "p",
         metaKey: true,
       });
       expect(hostKey).not.toHaveBeenCalled();
     } finally {
       document.removeEventListener("keydown", hostKey);
     }
-    expect(menu.getByText("Promote to Project")).not.toBeNull();
+    expect(menu.getByText("Change ownership…")).not.toBeNull();
     await act(async () => {
-      fireEvent.click(menu.getByText("Promote to Global"));
+      fireEvent.click(menu.getByText("Change ownership…"));
     });
-    await waitFor(() => expect(document.activeElement === shell).toBe(true));
+    const ownership = within(
+      slot.getByRole("dialog", { name: "Change ownership" }),
+    );
+    await act(async () => {
+      fireEvent.click(ownership.getByRole("button", { name: /Global/ }));
+    });
+    await waitFor(() =>
+      expect(document.activeElement).toBe(
+        slot.getByPlaceholderText("Search terminals"),
+      ),
+    );
     expect(
       slot.inspection.rpcCalls
-        .filter((call) => call.method === "promoteTab")
+        .filter((call) => call.method === "setTabOwner")
         .map((call) => call.input),
-    ).toEqual([{ terminalId: "current", target: "global" }]);
-    expect(slot.container.querySelector(".bb-fg-owner")?.textContent).toContain(
+    ).toEqual([{ terminalId: "current", scopeKey: "global" }]);
+    expect(slot.getByRole("option", { name: /current/ }).textContent).toContain(
       "Global",
     );
     await act(async () =>
@@ -617,7 +667,7 @@ it("isolates shell and switcher keys from BB while preserving text, clipboard, a
     fireEvent.keyUp(shell, { key: "Meta" });
     expect(hostKey).not.toHaveBeenCalled();
     await act(async () => switcher(shell));
-    const search = slot.getByPlaceholderText("Search…");
+    const search = slot.getByPlaceholderText("Search terminals");
     expect(press(search, "n", { metaKey: true }).defaultPrevented).toBe(true);
     fireEvent.change(search, { target: { value: "current" } });
     expect((search as HTMLInputElement).value).toBe("current");
@@ -659,3 +709,269 @@ it("keeps keyboard focus inside terminal mode while the first shell is loading",
     slot.lifecycle.unmount();
   }
 });
+
+it("renames from the actions menu and explicitly deletes the last shell without creating another", async () => {
+  const slot = await setup([tab("current", "worktree:A:one")]);
+  try {
+    await act(async () => toggle());
+    await slot.findByRole("textbox", { name: "Shell current" });
+    await act(async () => switcher());
+    const actions = slot.getByRole("button", { name: "Actions for current" });
+    await act(async () => {
+      fireEvent.keyDown(actions, { key: "Enter" });
+    });
+    await act(async () => {
+      fireEvent.click(
+        within(
+          document.querySelector('[role="menu"]') as HTMLElement,
+        ).getByText("Rename…"),
+      );
+    });
+    const field = slot.getByLabelText("Terminal name");
+    await waitFor(() => expect(document.activeElement).toBe(field));
+    fireEvent.change(field, { target: { value: "Dev server" } });
+    await act(async () => {
+      fireEvent.click(slot.getByRole("button", { name: "Save" }));
+    });
+    expect(
+      slot.container.querySelector(".bb-fg-session-trigger")?.textContent,
+    ).toBe("Dev server");
+    await act(async () => {
+      fireEvent.keyDown(actions, { key: "Enter" });
+    });
+    await act(async () => {
+      fireEvent.click(
+        within(
+          document.querySelector('[role="menu"]') as HTMLElement,
+        ).getByText("Delete terminal…"),
+      );
+    });
+    expect(
+      slot.inspection.rpcCalls.some((call) => call.method === "closeTab"),
+    ).toBe(false);
+    await act(async () => {
+      fireEvent.click(slot.getByRole("button", { name: "Delete" }));
+    });
+    expect(windowController.isOpen()).toBe(false);
+    expect(
+      slot.inspection.rpcCalls
+        .filter((call) => call.method === "closeTab")
+        .map((call) => call.input),
+    ).toEqual([{ terminalId: "current" }]);
+    expect(
+      slot.inspection.rpcCalls.some((call) => call.method === "openTab"),
+    ).toBe(false);
+  } finally {
+    slot.lifecycle.unmount();
+  }
+}, 40000);
+
+it("manages a filtered inactive terminal without changing shells and preserves the selector on return", async () => {
+  const slot = await setup([
+    tab("current", "worktree:A:one"),
+    tab("sibling", "worktree:A:two"),
+  ]);
+  try {
+    await act(async () => toggle());
+    const shell = await slot.findByRole("textbox", { name: "Shell current" });
+    const header = slot.container.querySelector(".bb-fg-header")!;
+    expect(within(header as HTMLElement).getAllByRole("button")).toHaveLength(
+      2,
+    );
+    await act(async () => switcher(shell));
+    const search = slot.getByPlaceholderText("Search terminals");
+    fireEvent.change(search, { target: { value: "sib" } });
+    expect(
+      slot.queryByRole("button", { name: "Actions for current" }),
+    ).toBeNull();
+    const action = slot.getByRole("button", { name: "Actions for sibling" });
+    await act(async () => fireEvent.keyDown(action, { key: "Enter" }));
+    expect(
+      slot.container.querySelector(".bb-fg-session-trigger")?.textContent,
+    ).toBe("current");
+    await act(async () =>
+      fireEvent.keyDown(document.querySelector('[role="menu"]')!, {
+        key: "Escape",
+      }),
+    );
+    await waitFor(() =>
+      expect(document.querySelector('[role="menu"]')).toBeNull(),
+    );
+    expect(
+      slot.getByRole("dialog", { name: "Switch terminal" }),
+    ).not.toBeNull();
+    await waitFor(() => expect(document.activeElement).toBe(action));
+    await act(async () => fireEvent.keyDown(action, { key: "Enter" }));
+    await act(async () =>
+      fireEvent.click(
+        within(
+          document.querySelector('[role="menu"]') as HTMLElement,
+        ).getByText("Rename…"),
+      ),
+    );
+    fireEvent.change(slot.getByLabelText("Terminal name"), {
+      target: { value: "Sibling build" },
+    });
+    await act(async () =>
+      fireEvent.click(slot.getByRole("button", { name: "Save" })),
+    );
+    await waitFor(() => expect(document.activeElement).toBe(search));
+    expect((search as HTMLInputElement).value).toBe("sib");
+    expect(slot.getByRole("option", { name: /Sibling build/ })).not.toBeNull();
+    expect(
+      slot.container.querySelector(".bb-fg-session-trigger")?.textContent,
+    ).toBe("current");
+    expect(
+      slot.inspection.rpcCalls
+        .filter((call) => call.method === "setTabName")
+        .map((call) => call.input),
+    ).toEqual([{ terminalId: "sibling", name: "Sibling build" }]);
+    const renamedAction = slot.getByRole("button", {
+      name: "Actions for Sibling build",
+    });
+    await act(async () => fireEvent.keyDown(renamedAction, { key: "Enter" }));
+    await act(async () =>
+      fireEvent.click(
+        within(
+          document.querySelector('[role="menu"]') as HTMLElement,
+        ).getByText("Restart shell"),
+      ),
+    );
+    expect(
+      slot.container.querySelector(".bb-fg-session-trigger")?.textContent,
+    ).toBe("current");
+    expect(
+      slot.inspection.rpcCalls
+        .filter((call) => call.method === "restartTab")
+        .map((call) => call.input),
+    ).toEqual([{ terminalId: "sibling", cols: 80, rows: 24 }]);
+    await act(async () => fireEvent.keyDown(renamedAction, { key: "Enter" }));
+    await act(async () =>
+      fireEvent.click(
+        within(
+          document.querySelector('[role="menu"]') as HTMLElement,
+        ).getByText("Delete terminal…"),
+      ),
+    );
+    expect(
+      slot.inspection.rpcCalls.some((call) => call.method === "closeTab"),
+    ).toBe(false);
+    await act(async () =>
+      fireEvent.click(slot.getByRole("button", { name: "Delete" })),
+    );
+    await waitFor(() => expect(document.activeElement).toBe(search));
+    expect(slot.getByText("No matches")).not.toBeNull();
+    expect(windowController.isOpen()).toBe(true);
+    fireEvent.keyDown(search, { key: "Escape" });
+    await waitFor(() => expect(document.activeElement).toBe(shell));
+  } finally {
+    slot.lifecycle.unmount();
+  }
+}, 90000);
+
+it("uses Cmd+K only in terminal mode and releases it to BB when hidden", async () => {
+  const hostKey = vi.fn();
+  document.addEventListener("keydown", hostKey);
+  const slot = await setup([tab("current", "worktree:A:one")]);
+  try {
+    await act(async () => switcher(document.body));
+    expect(windowController.isOpen()).toBe(false);
+    expect(hostKey).toHaveBeenCalledTimes(1);
+    hostKey.mockClear();
+    await act(async () => toggle());
+    const shell = await slot.findByRole("textbox", { name: "Shell current" });
+    await act(async () =>
+      fireEvent.keyDown(shell, { key: "p", metaKey: true }),
+    );
+    expect(slot.queryByRole("dialog", { name: "Switch terminal" })).toBeNull();
+    await act(async () => switcher(shell));
+    const search = slot.getByPlaceholderText("Search terminals");
+    await waitFor(() => expect(document.activeElement).toBe(search));
+    await act(async () =>
+      fireEvent.keyDown(search, { key: "k", metaKey: true, repeat: true }),
+    );
+    expect(
+      slot.getByRole("dialog", { name: "Switch terminal" }),
+    ).not.toBeNull();
+    await act(async () => switcher(search));
+    await waitFor(() => expect(document.activeElement).toBe(shell));
+    expect(hostKey).not.toHaveBeenCalled();
+    await act(async () => toggle(shell));
+    await act(async () => switcher(document.body));
+    expect(windowController.isOpen()).toBe(false);
+    expect(hostKey).toHaveBeenCalledTimes(1);
+  } finally {
+    slot.lifecycle.unmount();
+    document.removeEventListener("keydown", hostKey);
+  }
+});
+
+it("uses thread-search rows and treats a leading > as terminal search text", async () => {
+  const slot = await setup([
+    tab("older", "worktree:A:two"),
+    tab("current", "worktree:A:one"),
+    { ...tab("literal", "home:local"), customTitle: ">find output" },
+  ]);
+  try {
+    await act(async () => toggle());
+    const shell = await slot.findByRole("textbox", { name: "Shell current" });
+    await act(async () => switcher(shell));
+    const search = slot.getByRole("combobox", { name: "Search terminals" });
+    expect(
+      slot
+        .getAllByRole("option")
+        .filter((node) => node.hasAttribute("cmdk-item"))[0].textContent,
+    ).toContain("current");
+    expect(
+      slot.queryByRole("button", { name: "Terminal mode actions" }),
+    ).toBeNull();
+    expect(slot.container.querySelector(".bb-fg-palette-footer")).toBeNull();
+    fireEvent.change(search, { target: { value: ">find" } });
+    expect(slot.queryByRole("combobox", { name: "Search actions" })).toBeNull();
+    expect(slot.getByRole("option", { name: />find output/ })).not.toBeNull();
+    expect(slot.container.querySelector("mark")?.textContent).toBe(">find");
+    fireEvent.keyDown(search, { key: "Escape" });
+    await waitFor(() => expect(document.activeElement).toBe(shell));
+  } finally {
+    slot.lifecycle.unmount();
+  }
+});
+
+it("keeps window and find controls in session menus without changing search mode", async () => {
+  const slot = await setup([tab("current", "worktree:A:one")]);
+  try {
+    await act(async () => toggle());
+    const shell = await slot.findByRole("textbox", { name: "Shell current" });
+    await act(async () => switcher(shell));
+    const search = slot.getByRole("combobox", { name: "Search terminals" });
+    const actions = slot.getByRole("button", { name: "Actions for current" });
+    await act(async () => fireEvent.keyDown(actions, { key: "Enter" }));
+    await act(async () =>
+      fireEvent.click(
+        within(
+          document.querySelector('[role="menu"]') as HTMLElement,
+        ).getByText("Maximize"),
+      ),
+    );
+    expect(
+      slot.container.querySelector<HTMLElement>(".bb-fg-window")?.style.width,
+    ).toBe("1408px");
+    expect(slot.getByRole("combobox", { name: "Search terminals" })).toBe(
+      search,
+    );
+    await act(async () => fireEvent.keyDown(actions, { key: "Enter" }));
+    await act(async () =>
+      fireEvent.click(
+        within(
+          document.querySelector('[role="menu"]') as HTMLElement,
+        ).getByText("Find in terminal"),
+      ),
+    );
+    const find = slot.getByPlaceholderText("Find");
+    await waitFor(() => expect(document.activeElement).toBe(find));
+    fireEvent.keyDown(find, { key: "Escape" });
+    await waitFor(() => expect(document.activeElement).toBe(shell));
+  } finally {
+    slot.lifecycle.unmount();
+  }
+}, 60000);
