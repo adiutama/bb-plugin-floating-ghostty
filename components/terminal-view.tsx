@@ -153,9 +153,13 @@ export function TerminalView({
 
   return (
     <div
-      ref={containerRef}
       inert={!focused}
       className={cn("size-full", visible ? "block" : "hidden")}
-    />
+    >
+      {/* Wterm owns this node's classes and children. Keep React's changing
+          visibility classes on the wrapper so tab switches cannot erase the
+          renderer's scrolling, cursor, and history styles. */}
+      <div ref={containerRef} className="size-full" />
+    </div>
   );
 }

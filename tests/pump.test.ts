@@ -5,7 +5,11 @@ import { createRequire } from "node:module";
 import type { PluginRpcClient } from "@get-bb/plugin-sdk/app";
 import type { rpcContract } from "../server";
 import { createElement } from "react";
-import { render, fireEvent } from "@testing-library/react";
+import { render, fireEvent, cleanup } from "@testing-library/react";
+import {
+  TerminalView,
+  type TerminalViewProps,
+} from "../components/terminal-view";
 import { isolateTerminalKey } from "../lib/keyboard";
 import { TerminalPump } from "../lib/pump";
 
@@ -55,10 +59,91 @@ beforeEach(() => {
   );
 });
 afterEach(() => {
+  cleanup();
   for (const pump of pumps.splice(0)) pump.dispose();
   document.body.replaceChildren();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+});
+it("keeps the real renderer scrollable and focused after switching away and back through search", async () => {
+  vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(640);
+  vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(384);
+  const history = Array.from(
+    { length: 100 },
+    (_, i) => `line${String(i).padStart(3, "0")}\r\n`,
+  ).join("");
+  const call = vi.fn(async (method: string, input: Record<string, unknown>) =>
+    method === "read" ? output(input.replay ? history : "") : { ok: true },
+  );
+  const props: TerminalViewProps = {
+    rpc: { call } as PluginRpcClient<typeof rpcContract>,
+    terminalId: "switch-history",
+    visible: true,
+    focused: true,
+    fontSize: 13,
+    themeVersion: 0,
+    fitVersion: 0,
+    onStatus: vi.fn(),
+    onTitle: vi.fn(),
+    onCtrlArmed: vi.fn(),
+    onFindRequested: vi.fn(),
+    onScrollState: vi.fn(),
+    onSearchResults: vi.fn(),
+    onRequestRestart: vi.fn(),
+    onToggleRequested: vi.fn(),
+    onPumpReady: vi.fn(),
+    onPumpGone: vi.fn(),
+  };
+  const view = render(createElement(TerminalView, props));
+  await vi.waitFor(() =>
+    expect(view.container.textContent).toContain("line099"),
+  );
+  const viewport = view.container.querySelector<HTMLElement>(
+    "[data-renderer=ghostty]",
+  )!;
+  let top = 1216;
+  Object.defineProperties(viewport, {
+    scrollHeight: { value: 1600 },
+    scrollTop: {
+      get: () => top,
+      set: (value: number) => {
+        top = Math.max(0, Math.min(value, 1216));
+      },
+    },
+  });
+  for (let cycle = 0; cycle < 3; cycle++) {
+    // Search blurs the active tab; selecting another tab hides it. Opening
+    // search again and returning shows the same mounted renderer.
+    view.rerender(createElement(TerminalView, { ...props, focused: false }));
+    view.rerender(
+      createElement(TerminalView, { ...props, visible: false, focused: false }),
+    );
+    view.rerender(createElement(TerminalView, props));
+    expect(view.container.querySelector("[data-renderer=ghostty]")).toBe(
+      viewport,
+    );
+    expect(viewport.classList.contains("wterm")).toBe(true);
+    expect(viewport.classList.contains("cursor-blink")).toBe(true);
+    expect(viewport.closest("[inert]")).toBeNull();
+    expect(viewport.contains(document.activeElement)).toBe(true);
+    fireEvent.wheel(viewport, { deltaY: -1600 });
+    await vi.waitFor(() =>
+      expect(
+        viewport.querySelector(".term-scrollback-row")?.textContent,
+      ).toContain("line000"),
+    );
+    fireEvent.wheel(viewport, { deltaY: 1600 });
+    await vi.waitFor(() =>
+      expect(
+        viewport.querySelector(".term-scrollback-row")?.textContent,
+      ).not.toContain("line000"),
+    );
+  }
+  expect(
+    call.mock.calls.filter(
+      ([method, input]) => method === "read" && input.replay,
+    ),
+  ).toHaveLength(1);
 });
 const output = (text: string, seq = 1) => ({
   chunks: text ? [{ seq, dataBase64: btoa(text) }] : [],
@@ -272,7 +357,7 @@ it("lets Shift-wheel scroll history without sending a mouse report to the shell"
   );
 });
 
-it("preserves browser history scrolling while containing wheel events inside the terminal", async () => {
+it("handles history scrolling while containing wheel events inside the terminal", async () => {
   const { container, call } = createPump();
   await vi.waitFor(() => expect(container.textContent).toContain("Boo"));
   const hostWheel = vi.fn((event: Event) => event.preventDefault());
@@ -284,10 +369,74 @@ it("preserves browser history scrolling while containing wheel events inside the
       cancelable: true,
     });
     container.dispatchEvent(wheel);
-    expect(wheel.defaultPrevented).toBe(false);
+    expect(wheel.defaultPrevented).toBe(true);
     expect(hostWheel).not.toHaveBeenCalled();
     expect(call.mock.calls.some(([method]) => method === "write")).toBe(false);
   } finally {
     document.removeEventListener("wheel", hostWheel);
   }
+});
+
+it("scrolls history even when a surrounding overlay cancels native wheel defaults", async () => {
+  const { container, call } = createPump();
+  await vi.waitFor(() => expect(container.textContent).toContain("Boo"));
+  container.scrollTop = 300;
+  const hostLock = (event: Event) => event.preventDefault();
+  document.addEventListener("wheel", hostLock, { capture: true });
+  try {
+    fireEvent.wheel(container, { deltaY: -48 });
+    expect(container.scrollTop).toBe(252);
+    expect(call.mock.calls.some(([method]) => method === "write")).toBe(false);
+  } finally {
+    document.removeEventListener("wheel", hostLock, { capture: true });
+  }
+});
+
+it("repaints the history viewport when Latest is clicked after scrolling back", async () => {
+  const lines = Array.from(
+    { length: 100 },
+    (_, index) => `line-${String(index).padStart(3, "0")}`,
+  ).join("\r\n");
+  const call = vi.fn(async (method: string, input: Record<string, unknown>) =>
+    method === "read" ? output(input.replay ? lines : "") : { ok: true },
+  );
+  const { pump, container } = createPump(call);
+  let top = 0;
+  Object.defineProperties(container, {
+    scrollHeight: { value: 1600 },
+    scrollTop: {
+      get: () => top,
+      set: (value: number) => {
+        top = Math.max(0, Math.min(value, 1600 - container.clientHeight));
+      },
+    },
+  });
+  await vi.waitFor(() => expect(container.textContent).toContain("line-099"));
+  container.scrollTop = 0;
+  fireEvent.scroll(container);
+  await vi.waitFor(() =>
+    expect(
+      container.querySelector(".term-scrollback-row")?.textContent,
+    ).toContain("line-000"),
+  );
+  pump.scrollToBottom();
+  await vi.waitFor(() =>
+    expect(
+      container.querySelector(".term-scrollback-row")?.textContent,
+    ).not.toContain("line-000"),
+  );
+  expect(container.scrollTop).toBe(1600 - container.clientHeight);
+});
+
+it("inherits live host colors for the terminal and existing history", async () => {
+  const { pump, container } = createPump();
+  await vi.waitFor(() => expect(container.textContent).toContain("Boo"));
+  pump.refreshTheme();
+  expect(container.style.getPropertyValue("--term-bg")).toBe(
+    "var(--background)",
+  );
+  expect(container.style.getPropertyValue("--term-fg")).toBe(
+    "var(--foreground)",
+  );
+  expect(container.querySelector(".term-row")?.textContent).toContain("Boo");
 });

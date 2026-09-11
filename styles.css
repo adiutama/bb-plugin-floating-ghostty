@@ -237,8 +237,8 @@
 }
 
 .bb-fg-window [data-renderer="ghostty"] {
-  background: #1e1e1e;
-  color: #d4d4d4;
+  background: var(--background);
+  color: var(--foreground);
 }
 
 /* A terminal first, with management only when summoned. */
@@ -300,7 +300,7 @@
   color: var(--muted-foreground);
 }
 .bb-fg-terminal-body {
-  background: #1e1e1e;
+  background: var(--background);
   padding: 4px 12px 12px;
 }
 .bb-fg-state {
@@ -584,26 +584,26 @@
 
 /* One quiet surface: the title belongs to the terminal, not a second toolbar. */
 .bb-fg-surface {
-  background: #1e1e1e;
-  color: #d4d4d4;
-  border-color: rgb(255 255 255 / 0.12);
+  background: var(--background);
+  color: var(--foreground);
+  border-color: var(--border);
   box-shadow:
     0 18px 56px rgb(0 0 0 / 0.28),
     0 2px 8px rgb(0 0 0 / 0.16);
 }
 .bb-fg-header-ghost,
 .bb-fg-header .bb-fg-header-icon {
-  color: #929292;
+  color: var(--muted-foreground);
 }
 .bb-fg-header .bb-fg-session-trigger {
-  color: #d4d4d4;
+  color: var(--foreground);
   font-size: 12px;
 }
 .bb-fg-header button:hover:not(:disabled) {
-  background: rgb(255 255 255 / 0.07);
+  background: var(--state-hover, var(--muted));
 }
 .bb-fg-header button:focus-visible {
-  outline-color: #d4d4d4;
+  outline-color: var(--foreground);
 }
 .bb-fg-session-row {
   display: flex;

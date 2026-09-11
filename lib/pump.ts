@@ -13,7 +13,7 @@ import { resolveMonoFont } from "./theme";
 import { loadCore } from "./ghostty";
 import { searchTerminal } from "./search";
 import { TerminalTitleObserver } from "./terminal-title";
-import { installTerminalScrolling } from "./terminal-scroll";
+import { installTerminalScrolling, scrollTerminalTo } from "./terminal-scroll";
 
 type Rpc = PluginRpcClient<typeof rpcContract>;
 const FAST_INTERVAL = 40;
@@ -269,7 +269,10 @@ export class TerminalPump {
     );
   }
   scrollToBottom(): void {
-    this.options.container.scrollTop = this.options.container.scrollHeight;
+    scrollTerminalTo(
+      this.options.container,
+      this.options.container.scrollHeight,
+    );
     this.reportScrollState();
   }
   searchAvailable(): boolean {
@@ -294,8 +297,10 @@ export class TerminalPump {
       : -1;
     const match = matches[this.searchIndex];
     if (match)
-      this.options.container.scrollTop =
-        match.row * Math.ceil(this.fontSize * 1.2);
+      scrollTerminalTo(
+        this.options.container,
+        match.row * Math.ceil(this.fontSize * 1.2),
+      );
     this.options.onSearchResults?.({
       index: this.searchIndex,
       count: matches.length,
@@ -605,12 +610,14 @@ export class TerminalPump {
     this.fit();
   }
   refreshTheme(): void {
-    // Ghostty 0.5 fixes default cell colors when initialized. Keep terminal ink
-    // consistent across theme changes; the surrounding chrome uses BB's theme.
+    // Default cells use these CSS variables, including already-rendered history.
+    // Explicit ANSI/RGB colors remain under the terminal program's control.
     const el = this.options.container;
-    el.style.setProperty("--term-bg", "#1e1e1e");
-    el.style.setProperty("--term-fg", "#d4d4d4");
-    el.style.setProperty("--term-cursor", "#c4b5fd");
+    el.style.setProperty("--term-bg", "var(--background)");
+    el.style.setProperty("--term-fg", "var(--foreground)");
+    el.style.setProperty("--term-cursor", "var(--foreground)");
+    el.style.setProperty("--term-color-0", "var(--background)");
+    el.style.setProperty("--term-color-7", "var(--foreground)");
   }
   paste(text: string): void {
     this.send(

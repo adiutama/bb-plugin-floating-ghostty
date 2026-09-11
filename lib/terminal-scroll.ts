@@ -1,8 +1,14 @@
 import { arrowSequence } from "./keys";
 import { consumeScrollPixels } from "./scroll";
 
-/** Wterm handles SGR mouse reports and browser-native history scrolling. Fill
- * its alternate-screen wheel gap and provide the usual Shift history override.
+/** Notify Wterm's virtualized renderer as well as moving the browser viewport. */
+export function scrollTerminalTo(element: HTMLElement, top: number): void {
+  element.scrollTop = top;
+  element.dispatchEvent(new Event("scroll"));
+}
+
+/** Own history wheel movement even when a host overlay cancels browser defaults.
+ * Wterm still owns SGR mouse reports; alternate-screen apps receive cursor keys.
  */
 export function installTerminalScrolling({
   element,
@@ -39,7 +45,7 @@ export function installTerminalScrolling({
         event.preventDefault();
         event.stopImmediatePropagation();
         residual = 0;
-        element.scrollTop += pixels;
+        scrollTerminalTo(element, element.scrollTop + pixels);
       } else if (current.alternate && !current.reportsMouse) {
         event.preventDefault();
         event.stopImmediatePropagation();
@@ -52,6 +58,11 @@ export function installTerminalScrolling({
               current.applicationCursor,
             ).repeat(Math.min(Math.abs(step.lines), 40)),
           );
+      } else if (!current.reportsMouse) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        residual = 0;
+        scrollTerminalTo(element, element.scrollTop + pixels);
       } else {
         residual = 0;
       }
