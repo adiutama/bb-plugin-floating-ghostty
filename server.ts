@@ -2,9 +2,8 @@ import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 // bb-plugin-floating-ghostty — backend.
 //
-// A tab manager in front of `bb.sdk.terminals`. The floating window's
-// navigation is a tab strip; each tab maps to one real PTY session on some
-// host. The open-tab list and the active tab are kv-persisted, so closing the
+// Persistent terminal inventory in front of `bb.sdk.terminals`. Each record maps
+// to one real PTY and retains Global, Project, or Worktree ownership. The open-tab list and the active tab are kv-persisted, so closing the
 // window, reloading the app, or restarting bb reattaches every surviving shell
 // instead of losing them.
 //
@@ -22,6 +21,7 @@ import { createRequire } from "node:module";
 //     applied, so a slow `init` can never resurrect a closed tab or drop a
 //     freshly opened one just because it started earlier.
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
+import { availableHere, ownerOf } from "./lib/context";
 import { meaningfulShellTitle } from "./lib/terminal-io";
 import { z } from "zod";
 
@@ -39,7 +39,7 @@ const scopeSchema = z.object({
   /** Null means "start in the host's home directory". */
   cwd: z.string().nullable(),
   online: z.boolean(),
-  kind: z.enum(["project", "home"]),
+  kind: z.enum(["project", "home", "worktree"]),
 });
 
 const tabSchema = z.object({
@@ -70,7 +70,34 @@ const geometrySchema = z.object({
   rows: z.number().int().min(1).max(2000),
 });
 
+const contextInput = z
+  .object({ projectId: z.string().nullable(), threadId: z.string().nullable() })
+  .strict();
+const shortcutSchema = z.object({
+  key: z.string(),
+  mod: z.boolean(),
+  meta: z.boolean(),
+  control: z.boolean(),
+  alt: z.boolean(),
+  shift: z.boolean(),
+});
+
 export const rpcContract = defineRpcContract({
+  resolveContext: {
+    input: contextInput,
+    output: z.object({
+      context: z.object({
+        projectId: z.string().nullable(),
+        environmentId: z.string().nullable(),
+        hostId: z.string().nullable(),
+      }),
+      scopes: z.array(scopeSchema),
+    }),
+  },
+  terminalShortcuts: {
+    input: z.null(),
+    output: z.array(shortcutSchema),
+  },
   /** Everything the window needs on open: directories, surviving tabs, prefs. */
   init: {
     input: z.null(),
@@ -82,6 +109,7 @@ export const rpcContract = defineRpcContract({
       prefs: z.object({
         fontSize: z.number().int(),
         shortcutEnabled: z.boolean(),
+        overrideNativeShortcut: z.boolean(),
       }),
     }),
   },
@@ -91,6 +119,12 @@ export const rpcContract = defineRpcContract({
       .extend(geometrySchema.shape)
       .strict(),
     output: z.object({ snapshot: snapshotSchema, opened: tabSchema }),
+  },
+  promoteTab: {
+    input: z
+      .object({ terminalId: z.string(), target: z.enum(["project", "global"]) })
+      .strict(),
+    output: z.object({ snapshot: snapshotSchema }),
   },
   closeTab: {
     input: z.object({ terminalId: z.string() }).strict(),
@@ -170,6 +204,9 @@ type Snapshot = z.infer<typeof snapshotSchema>;
 interface StoredTab {
   terminalId: string;
   scopeKey: string;
+  /** Ownership can widen without moving the process or its restart destination. */
+  launchScopeKey?: string;
+  hostId?: string;
 }
 
 /**
@@ -263,8 +300,41 @@ export default async function plugin(bb: BbPluginApi) {
     },
     shortcutEnabled: {
       type: "boolean",
-      label: "Toggle with Ctrl+Shift+`",
+      label: "Toggle with Ctrl+backtick",
       default: true,
+    },
+    centerOnOpen: {
+      type: "boolean",
+      label: "Center on open",
+      description:
+        "Return to the center each time, keeping the terminal’s size.",
+      default: false,
+    },
+    customWindowSize: {
+      type: "boolean",
+      label: "Custom opening size",
+      description:
+        "Use the dimensions below when opening. Smaller screens use fullscreen.",
+      default: false,
+    },
+    windowWidth: {
+      type: "number",
+      label: "Width (px)",
+      default: 1100,
+      experimental_schema: z.number().int().min(360).max(3840),
+    },
+    windowHeight: {
+      type: "number",
+      label: "Height (px)",
+      default: 720,
+      experimental_schema: z.number().int().min(240).max(2160),
+    },
+    overrideNativeShortcut: {
+      type: "boolean",
+      label: "Override BB terminal shortcut",
+      description:
+        "Use BB’s terminal shortcut, hide Start terminal, and disable Ctrl+backtick while enabled.",
+      default: false,
     },
   });
 
@@ -343,7 +413,14 @@ export default async function plugin(bb: BbPluginApi) {
 
   async function readStoredTabs(): Promise<StoredTab[]> {
     const result = z
-      .array(z.object({ terminalId: z.string(), scopeKey: z.string() }))
+      .array(
+        z.object({
+          terminalId: z.string(),
+          scopeKey: z.string(),
+          launchScopeKey: z.string().optional(),
+          hostId: z.string().optional(),
+        }),
+      )
       .safeParse(await bb.storage.kv.get(TABS_KEY));
     return result.success ? result.data : [];
   }
@@ -472,11 +549,20 @@ export default async function plugin(bb: BbPluginApi) {
             "terminals.get",
           );
           rememberStatus(session.id, session.status, session.exitCode);
-          if (!isLiveStatus(session.status)) return null;
+          // Keep exited shells reviewable/restartable until explicitly ended.
           const scope =
-            scopes.find((item) => item.key === entry.scopeKey) ?? null;
+            scopes.find(
+              (item) => item.key === (entry.launchScopeKey ?? entry.scopeKey),
+            ) ??
+            worktreeScopes.get(entry.launchScopeKey ?? entry.scopeKey) ??
+            null;
           const label = scope?.label ?? labelFromCwd(session.initialCwd);
-          const hostName = scope?.hostName ?? "";
+          const hostName =
+            scope?.hostName ??
+            scopes.find(
+              (item) => item.kind === "home" && item.hostId === entry.hostId,
+            )?.hostName ??
+            "";
           const tab: Tab = {
             terminalId: session.id,
             scopeKey: entry.scopeKey,
@@ -513,7 +599,9 @@ export default async function plugin(bb: BbPluginApi) {
       // Pruning is itself a change, so it earns a new revision.
       await bb.storage.kv.set(
         TABS_KEY,
-        tabs.map(({ terminalId, scopeKey }) => ({ terminalId, scopeKey })),
+        stored.filter((entry) =>
+          tabs.some((tab) => tab.terminalId === entry.terminalId),
+        ),
       );
       revision = await bumpRevision();
     }
@@ -524,8 +612,52 @@ export default async function plugin(bb: BbPluginApi) {
     return finishSnapshot(tabs, revision, storedActive);
   }
 
+  const worktreeScopes = new Map<string, Scope>();
+
+  async function worktreeScope(
+    projectId: string,
+    environmentId: string,
+  ): Promise<Scope> {
+    const environment = await withTimeout(
+      bb.sdk.environments.get({ environmentId }),
+      SDK_TIMEOUT_MS,
+      "environments.get",
+    );
+    if (
+      environment.projectId !== projectId ||
+      !environment.path ||
+      environment.status === "destroyed" ||
+      environment.status === "destroying"
+    ) {
+      throw new Error("That worktree is no longer available.");
+    }
+    const scopes = await listScopes();
+    const host = scopes.find(
+      (scope) => scope.key === `home:${environment.hostId}`,
+    );
+    const scope: Scope = {
+      key: `worktree:${projectId}:${environmentId}`,
+      kind: "worktree",
+      label:
+        environment.name ||
+        environment.branchName ||
+        labelFromCwd(environment.path),
+      detail: environment.path,
+      cwd: environment.path,
+      hostId: environment.hostId,
+      hostName: host?.hostName ?? environment.hostId,
+      online: environment.status === "ready" && host?.online === true,
+    };
+    worktreeScopes.set(scope.key, scope);
+    return scope;
+  }
+
   async function requireScope(scopeKey: string): Promise<Scope> {
-    const scope = (await listScopes()).find((entry) => entry.key === scopeKey);
+    const owner = ownerOf(scopeKey);
+    const scope =
+      owner.kind === "worktree" && owner.projectId && owner.environmentId
+        ? await worktreeScope(owner.projectId, owner.environmentId)
+        : (await listScopes()).find((entry) => entry.key === scopeKey);
     if (scope === undefined) {
       throw new Error("That directory is no longer available.");
     }
@@ -544,7 +676,13 @@ export default async function plugin(bb: BbPluginApi) {
       bb.sdk.terminals.create({
         cols,
         rows,
-        scope: { kind: "host_path", hostId: scope.hostId, cwd: scope.cwd },
+        scope:
+          scope.kind === "worktree"
+            ? {
+                kind: "environment",
+                environmentId: ownerOf(scope.key).environmentId!,
+              }
+            : { kind: "host_path", hostId: scope.hostId, cwd: scope.cwd },
         // `bb terminal list` has no grouping to lean on, so name the machine here.
         title: defaultTitle(scope.label, scope.hostName),
       }),
@@ -565,6 +703,95 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   bb.rpc.register(rpcContract, {
+    async resolveContext({ projectId, threadId }) {
+      let environmentId: string | null = null;
+      if (threadId !== null) {
+        const thread = await withTimeout(
+          bb.sdk.threads.get({ threadId }),
+          SDK_TIMEOUT_MS,
+          "threads.get",
+        );
+        projectId = thread.projectId;
+        environmentId = thread.environmentId;
+      }
+      const scopes = await listScopes();
+      // Personal/projectless conversations use Global shells.
+      if (!scopes.some((scope) => scope.key === `project:${projectId}`)) {
+        projectId = null;
+        environmentId = null;
+      }
+      const environmentIds = new Set<string>();
+      if (environmentId !== null) environmentIds.add(environmentId);
+      if (projectId !== null) {
+        // Include surviving sessions even if their originating thread was archived.
+        for (const tab of await readStoredTabs()) {
+          const owner = ownerOf(tab.scopeKey);
+          if (owner.projectId === projectId && owner.environmentId)
+            environmentIds.add(owner.environmentId);
+        }
+        // The public SDK exposes environments through threads, not a global environment list.
+        for (let offset = 0; ; offset += 100) {
+          const threads = await withTimeout(
+            bb.sdk.threads.list({
+              projectId,
+              includeHidden: true,
+              limit: 100,
+              offset,
+            }),
+            SDK_TIMEOUT_MS,
+            "threads.list",
+          );
+          for (const thread of threads)
+            if (thread.environmentId) environmentIds.add(thread.environmentId);
+          if (threads.length < 100) break;
+        }
+      }
+      const resolved = await Promise.allSettled(
+        [...environmentIds].map((id) => worktreeScope(projectId!, id)),
+      );
+      const worktrees = resolved.flatMap((result) =>
+        result.status === "fulfilled" ? [result.value] : [],
+      );
+      const current = worktrees.find(
+        (scope) => ownerOf(scope.key).environmentId === environmentId,
+      );
+      if (environmentId !== null && !current)
+        throw new Error(
+          "The current worktree is unavailable. Try again when it reconnects.",
+        );
+      const project = scopes.find(
+        (scope) => scope.key === `project:${projectId}`,
+      );
+      const context = {
+        projectId,
+        environmentId,
+        hostId: current?.hostId ?? project?.hostId ?? null,
+      };
+      return {
+        context,
+        scopes: [
+          ...scopes.filter((scope) => availableHere(scope.key, context)),
+          ...worktrees,
+        ],
+      };
+    },
+
+    async terminalShortcuts() {
+      if (!(await settings.get()).overrideNativeShortcut) return [];
+      const config = await withTimeout(
+        bb.sdk.system.config(),
+        SDK_TIMEOUT_MS,
+        "system.config",
+      );
+      const override = config.keybindingOverrides.find(
+        (binding) => binding.command === "terminal.open",
+      );
+      if (override) return override.shortcut ? [override.shortcut] : [];
+      return config.keybindings
+        .filter((binding) => binding.command === "terminal.open")
+        .map((binding) => binding.shortcut);
+    },
+
     async init() {
       const [snap, scopes, recentScopeKeys, values] = await Promise.all([
         serialize(snapshot),
@@ -580,6 +807,7 @@ export default async function plugin(bb: BbPluginApi) {
         prefs: {
           fontSize: Number.isFinite(parsedFontSize) ? parsedFontSize : 13,
           shortcutEnabled: values.shortcutEnabled,
+          overrideNativeShortcut: values.overrideNativeShortcut,
         },
       };
     },
@@ -596,6 +824,8 @@ export default async function plugin(bb: BbPluginApi) {
         stored.push({
           terminalId: opened.terminalId,
           scopeKey: opened.scopeKey,
+          launchScopeKey: scope.key,
+          hostId: scope.hostId,
         });
         await bb.storage.kv.set(TABS_KEY, stored);
         await bb.storage.kv.set(ACTIVE_TAB_KEY, opened.terminalId);
@@ -604,6 +834,38 @@ export default async function plugin(bb: BbPluginApi) {
         lastKnownTabs.set(opened.terminalId, opened);
         rememberStatus(opened.terminalId, opened.status, opened.exitCode);
         return { snapshot: await snapshot(), opened };
+      });
+    },
+
+    async promoteTab({ terminalId, target }) {
+      const initial = (await readStoredTabs()).find(
+        (entry) => entry.terminalId === terminalId,
+      );
+      if (!initial)
+        throw new Error("That terminal does not belong to Floating Ghostty.");
+      // Legacy records acquire their execution identity on first promotion.
+      const launchScopeKey = initial.launchScopeKey ?? initial.scopeKey;
+      const hostId =
+        initial.hostId ?? (await requireScope(launchScopeKey)).hostId;
+      return serialize(async () => {
+        const stored = await readStoredTabs();
+        const entry = stored.find((entry) => entry.terminalId === terminalId);
+        if (!entry) throw new Error("That tab is no longer open.");
+        const owner = ownerOf(entry.scopeKey);
+        if (target === "project" && !owner.projectId) {
+          throw new Error("A Global terminal cannot be promoted to a project.");
+        }
+        const scopeKey =
+          target === "global" ? `home:${hostId}` : `project:${owner.projectId}`;
+        if (scopeKey === entry.scopeKey) return { snapshot: await snapshot() };
+        entry.launchScopeKey = launchScopeKey;
+        entry.hostId = hostId;
+        entry.scopeKey = scopeKey;
+        await bb.storage.kv.set(TABS_KEY, stored);
+        const known = lastKnownTabs.get(terminalId);
+        if (known) lastKnownTabs.set(terminalId, { ...known, scopeKey });
+        await bumpRevision();
+        return { snapshot: await snapshot() };
       });
     },
 
@@ -660,7 +922,7 @@ export default async function plugin(bb: BbPluginApi) {
       // Null means "go back to the name the tab was opened with", which is
       // what the tab strip falls back to showing.
       const scope = (await listScopes()).find(
-        (item) => item.key === entry.scopeKey,
+        (item) => item.key === (entry.launchScopeKey ?? entry.scopeKey),
       );
       const restored =
         scope === undefined ? null : defaultTitle(scope.label, scope.hostName);
@@ -706,7 +968,7 @@ export default async function plugin(bb: BbPluginApi) {
       );
       if (found === undefined) throw new Error("That tab is no longer open.");
 
-      const scope = await requireScope(found.scopeKey);
+      const scope = await requireScope(found.launchScopeKey ?? found.scopeKey);
       try {
         await withTimeout(
           bb.sdk.terminals.close({ terminalId, mode: "force" }),
@@ -737,10 +999,9 @@ export default async function plugin(bb: BbPluginApi) {
           throw new Error("That tab is no longer open.");
         }
         // Replace in place so the tab keeps its position in the strip.
-        stored[index] = {
-          terminalId: restarted.terminalId,
-          scopeKey: restarted.scopeKey,
-        };
+        // Promotion may have completed while the replacement PTY was starting.
+        restarted.scopeKey = stored[index]!.scopeKey;
+        stored[index] = { ...stored[index]!, terminalId: restarted.terminalId };
         await bb.storage.kv.set(TABS_KEY, stored);
         const storedActive = await bb.storage.kv.get<string>(ACTIVE_TAB_KEY);
         if (storedActive === terminalId) {

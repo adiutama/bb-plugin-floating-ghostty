@@ -15,12 +15,17 @@ export interface TerminalViewProps {
   terminalId: string;
   /** Window open AND this tab selected: drives polling, sizing, and focus. */
   visible: boolean;
+  focused: boolean;
   fontSize: number;
   /** Bumped when the host theme changes; pumps re-derive their palette. */
   themeVersion: number;
   /** Bumped on window drag/resize commits; the visible pump refits. */
   fitVersion: number;
-  onStatus: (terminalId: string, status: TabStatus, detail: string | null) => void;
+  onStatus: (
+    terminalId: string,
+    status: TabStatus,
+    detail: string | null,
+  ) => void;
   /** A normalised OSC title from the shell, or null when it has none. */
   onTitle: (terminalId: string, title: string | null) => void;
   /** The on-screen bar's Ctrl latch changed inside this tab's terminal. */
@@ -44,6 +49,7 @@ export function TerminalView({
   rpc,
   terminalId,
   visible,
+  focused,
   fontSize,
   themeVersion,
   fitVersion,
@@ -127,8 +133,11 @@ export function TerminalView({
 
   useEffect(() => {
     pumpRef.current?.setVisible(visible);
-    if (visible) pumpRef.current?.focus();
   }, [visible]);
+
+  useEffect(() => {
+    pumpRef.current?.setFocused(focused);
+  }, [focused]);
 
   useEffect(() => {
     pumpRef.current?.setFontSize(fontSize);
@@ -145,6 +154,7 @@ export function TerminalView({
   return (
     <div
       ref={containerRef}
+      inert={!focused}
       className={cn("size-full", visible ? "block" : "hidden")}
     />
   );

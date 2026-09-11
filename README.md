@@ -3,26 +3,55 @@
 A little ghost for your shells. **Floating Ghostty** combines a draggable BB
 terminal window with Ghostty's terminal engine through Wterm.
 
-Open the ghost button in BB's sidebar footer, or press **Ctrl+Shift+backtick**.
-Choose a project or machine to summon a shell. Hide the window when you're done
-looking at it; the shell keeps running.
+Open the ghost button in BB's sidebar footer, or press **Ctrl+backtick**.
+The overlay goes straight to a shell, ready to type. Press the same shortcut,
+use the **×**, or click outside to return to BB. Your shells keep running.
+
+## Context and terminal selection
+
+Each terminal belongs to **Global**, a **Project**, or a **Worktree** (BB environment).
+Changing directory inside a shell does not change its owner.
+
+- Outside a project, Global terminals are available.
+- Inside a project, Global terminals and every terminal owned by that project or
+  any of its worktrees are available. Other projects are excluded.
+- Reopening remembers your selection per worktree or project, on this client.
+  Without a remembered selection, it prefers the current worktree, then Project,
+  then Global, using the most recently visited terminal within that scope.
+- If none matches, it starts a shell in the current scope. An unavailable current
+  machine/worktree produces a recovery state instead of silently starting elsewhere.
+- Navigating to another thread or project hides the overlay. Threads sharing an
+  environment share its worktree terminals.
+
+**Cmd+P** (Ctrl+P on other platforms) opens the terminal switcher. It is a flat,
+searchable list. The **All** filter includes Global plus the current project and its worktrees;
+use the filter beside search to narrow it to Global, Project, or one worktree. Enter switches and
+focuses the shell; Escape returns to the existing shell. These keys belong to the
+switcher only while it is open; Cmd/Ctrl+P is reserved while the terminal overlay
+is open.
+
+**Tab / Shift+Tab** cycles between search and category; arrow keys change the
+category. Terminal mode contains keyboard input, including its portaled actions
+menu, so it does not reach BB's in-app shortcuts. Typing, shell control keys,
+copy/paste, terminal search, and the toggle continue to work. OS-reserved shortcuts
+and native application-menu commands remain controlled by BB/the operating system.
+
+The **+** action immediately starts a shell in the current BB context: Worktree,
+then Project, then Global. There is no creation form, and the selected terminal
+or switcher filter does not change the destination. After creation, use
+**Terminal actions → Promote to Project / Global** to widen its ownership.
+Promotion keeps the running process, directory, and original restart destination.
 
 ## Features
 
-- A floating window you can drag, resize from any edge, maximize, and restore.
-- Multiple shell tabs, with independent local or remote PTYs managed by BB.
-- Persistent tabs and window geometry; surviving shells reattach after a reload.
-- Ghostty 0.5.0 via WebAssembly, with Wterm's DOM renderer and Unicode support.
-- Bundled Nerd Font symbols, terminal colors, mouse input, alternate-screen apps,
-  safe OSC 8 web links, and Wterm's bounded Kitty image support.
-- Search retained terminal rows with Cmd/Ctrl+F; Enter and Shift+Enter navigate
-  matches. Search is case-insensitive, single-line, and capped at 1,000 matches.
-- A compact sheet and extra keyboard controls on small screens.
-- Font-size settings and an optional keyboard shortcut.
-
-The shortcut deliberately includes **Shift** so it can coexist with Floating
-Terminal's Ctrl+backtick shortcut. Storage, sessions, CSS, and branding are independent
-of both reference plugins.
+- Centered floating overlay with drag, edge resize, maximize, and restore.
+- Independent local or remote PTYs managed by BB; surviving sessions reattach on reload.
+- Ghostty 0.5.0 via WebAssembly and Wterm's DOM renderer, bundled Nerd Font symbols,
+  Unicode, mouse input, alternate-screen apps, safe OSC 8 web links, and bounded Kitty images.
+- Scrollback search with Cmd/Ctrl+F; Enter and Shift+Enter navigate matches.
+  Search is case-insensitive, single-line, and capped at 1,000 matches.
+- A keyboard-aware fullscreen surface and extra keys on small screens.
+- Live shortcut settings and configurable font size.
 
 ## Install locally
 
@@ -40,25 +69,44 @@ native configuration file.
 
 ## Controls
 
-| Action             | Control                                                 |
-| ------------------ | ------------------------------------------------------- |
-| Show or hide       | Ghost button, or Ctrl+Shift+backtick                    |
-| New shell          | `+`, then choose a project or machine                   |
-| Move               | Drag the title bar                                      |
-| Resize             | Drag an edge or corner                                  |
-| Maximize / restore | Title-bar button, or double-click empty title-bar space |
-| Close a shell      | Its tab's close button, or middle-click the tab         |
-| Restart a shell    | Restart button; Enter after the shell exits             |
-| Find               | Cmd/Ctrl+F inside the terminal                          |
-| Jump to new output | **Latest** while viewing history                        |
+| Action             | Control                                                   |
+| ------------------ | --------------------------------------------------------- |
+| Show / hide        | Ghost button or Ctrl+backtick                             |
+| Switch terminal    | Click the terminal title or Cmd/Ctrl+P                    |
+| Filter terminals   | Filter beside search                                      |
+| New shell          | **+** (current BB context)                                |
+| Back to BB         | **×**, toggle shortcut, or click outside                  |
+| Move / resize      | Drag the header / an edge or corner                       |
+| Maximize / restore | Terminal actions menu, or double-click empty header space |
+| End a shell        | Terminal actions → End terminal                           |
+| Restart            | Terminal actions → Restart shell; Enter after shell exit  |
+| Find               | Cmd/Ctrl+F inside the terminal                            |
+| Jump to new output | **Latest** while viewing history                          |
 
-**Hiding the window preserves shells. Closing a tab terminates that shell.**
+**Hiding preserves shells. End terminal terminates the selected shell.**
 Disabling or reloading the plugin detaches its UI; BB still owns the PTYs.
 Sessions survive only as long as their host's PTY service does.
 
-Settings live under **Extensions → Floating Ghostty**. Updated font size and
-shortcut preferences are read when the window opens. The frame follows BB's
-theme; the terminal retains a dark palette.
+Settings live under **Extensions → Floating Ghostty**:
+
+- **Toggle with Ctrl+backtick**: enabled by default; inactive during native override.
+- **Override BB terminal shortcut**: **disabled by default**, opt in to make BB's
+  configured terminal shortcut toggle this overlay. It follows BB's custom
+  keybinding, including a disabled binding, and does not edit BB's settings.
+  While enabled, BB's **Start terminal** action is hidden (including its shortcut
+  hint and reorder handle), and Ctrl+backtick stops toggling the overlay. Turning
+  override off restores the action and your Ctrl+backtick preference.
+  Changes to BB's binding are refreshed on browser/window focus and every 30 seconds.
+- **Center on open**: disabled by default. Recenter on each opening, preserving size.
+- **Custom opening size**: disabled by default. Apply **Width (px)** and **Height (px)**
+  on each opening, independently of the centering preference. Defaults are 1100 × 720.
+  A viewport smaller than either dimension uses fullscreen, as do BB's compact
+  viewports. Fullscreen never overwrites the remembered desktop geometry.
+- **Font size**: applied when the overlay opens.
+
+The frame follows BB's theme; the terminal retains a dark palette. Existing POC
+machine-home sessions become Global and project sessions retain their project
+ownership. Existing processes are preserved.
 
 ## Development and verification
 
@@ -83,13 +131,19 @@ npm run test:live
 # Optional: BB_SERVER_URL and BB_SMOKE_HOST_ID select the target server/host.
 ```
 
-Desktop drag/resize appearance and mobile keyboard layout still need a manual
-visual check. Automated access to the BB window was unavailable during authoring.
+Desktop appearance, interaction with BB’s native shortcut handler, and mobile
+keyboard layout still need a manual visual check. Automated access to the BB
+window was unavailable during this implementation.
 
 ## Implementation
 
-- `app.tsx` registers BB's `experimental_appOverlay` and sidebar footer action.
-- `components/floating-terminal.tsx` owns window layout and tab presentation.
+- `app.tsx` registers BB's `experimental_appOverlay`, sidebar footer action, and
+  trusted content script. `lib/native-launcher.ts` hides the native action using
+  its current BB DOM ID; this small host adapter may need updating if BB changes
+  its action markup. It restores the action on opt-out or plugin unload.
+- `components/floating-terminal.tsx` owns the shell/switcher flow, context selection, and window layout.
+- `lib/context.ts` defines project visibility, scope priority, and client selection memory.
+- `components/terminal-switcher.tsx` owns the flat list and filters.
 - `lib/pump.ts` connects one Ghostty renderer to one BB PTY. Hidden tabs stop
   polling; replayed terminal queries cannot become shell input.
 - `lib/ghostty.ts` loads the authenticated WASM and adapts Wterm's Ghostty guards.

@@ -1,7 +1,7 @@
 // A tiny external store for the window's open state.
 //
 // Two things drive the window from outside React: the sidebar footer button
-// (host-rendered, no component) and the global Ctrl+Shift+` shortcut. Both call this
+// (host-rendered, no component) and the configured toggle shortcuts. Both call this
 // singleton; the React tree subscribes via useSyncExternalStore. Module-level
 // state is safe here because BB instantiates this frontend module once
 // per bb window, tab, or remote client.

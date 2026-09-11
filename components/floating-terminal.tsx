@@ -1,14 +1,6 @@
-// The floating terminal window.
-//
-// All React: one component owns open state (via the external controller),
-// geometry (via the frame helpers), the tab list (via the tabs reducer), and
-// renders the tab bar, one TerminalView per open tab, and a teaching empty
-// state. The only imperative islands are Ghostty itself (inside TerminalView)
-// and the pointer-capture drag/resize handlers, both behind refs.
-//
-// Nothing renders until the window is first opened; from then on it stays
-// mounted even while hidden, which is what keeps every tab's scrollback alive.
-// Show/hide is a CSS transition driven by data-state.
+// One peekable terminal surface. Ownership comes from BB context; selection and
+// visibility belong to this client. Visited terminals remain mounted across Back
+// and navigation so hiding never tears down a process or discards scrollback.
 import {
   useCallback,
   useEffect,
@@ -17,20 +9,42 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
-import { GhostMark } from "./ghost-mark";
+
 import { toast } from "sonner";
 import { Icon } from "@/components/ui/icon";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { useIsCompactViewport } from "@/components/ui/hooks/use-compact-viewport";
-import { ShellPicker } from "@/components/shell-picker";
+import { TerminalSwitcher } from "./terminal-switcher";
+import { TerminalHeader } from "./terminal-header";
 import type { ScopeOption } from "@/lib/scopes";
 import { FindBar } from "@/components/find-bar";
 import { KeyToolbar } from "@/components/key-toolbar";
-import { TabBar } from "@/components/tab-bar";
+import {
+  availableHere,
+  contextKey,
+  globalContext,
+  preferredScope,
+  preferredTerminal,
+  readSelection,
+  rememberSelection,
+  scopeLabel,
+  type TerminalContext,
+} from "../lib/context";
+import {
+  isAlternativeToggle,
+  isSwitcherShortcut,
+  matchesShortcut,
+  type Shortcut,
+} from "../lib/shortcuts";
 import { TerminalView } from "@/components/terminal-view";
+import { isolateTerminalKey } from "../lib/keyboard";
+import { nativeLauncherOverride } from "../lib/native-launcher";
 import { windowController } from "@/lib/controller";
 import {
   clampFrame,
+  openingFrame,
+  windowPreferences,
+  needsFullscreen,
   installDrag,
   installResize,
   loadFrame,
@@ -40,10 +54,9 @@ import {
 } from "@/lib/frame";
 import type { TerminalPump } from "@/lib/pump";
 import { arrowSequence, type ToolbarKey } from "@/lib/keys";
-import type { PluginRpcClient } from "@get-bb/plugin-sdk/app";
+import { useSettings, type PluginRpcClient } from "@get-bb/plugin-sdk/app";
 import { trackVisualViewport } from "@/lib/viewport";
 import { emptyTabs, tabsReducer, type TabStatus } from "@/lib/tabs";
-import { cn } from "@/lib/utils";
 import type { rpcContract } from "../server";
 
 /** Edge hit areas, wide enough to grab without visually thickening the border. */
@@ -68,57 +81,12 @@ const MAX_GUTTER = 16;
 const DEFAULT_COLS = 80;
 const DEFAULT_ROWS = 24;
 
-/**
- * The window with nothing in it. Its job is to get you into a shell in one
- * click and to answer the one question that changes how you use it — whether
- * closing the window kills your work. Everything else stays quiet.
- */
-function EmptyState({
-  scopes,
-  recentScopeKeys,
-  showHosts,
-  onPick,
-}: {
-  scopes: ScopeOption[];
-  recentScopeKeys: string[];
-  showHosts: boolean;
-  onPick: (scopeKey: string) => void;
-}) {
-  return (
-    // A column, not a row: `items-center` on a row container sizes the child
-    // from its content, so a long directory list grew past the window and got
-    // centre-clipped — the heading scrolled off the top edge and the list could
-    // not scroll. As a column with `min-h-0` the child shrinks to the available
-    // height instead, and the list inside it scrolls.
-    <div className="flex size-full min-h-0 flex-col items-center justify-center overflow-hidden p-4">
-      {/* Centred while it fits, filling and scrolling once it does not. */}
-      <div className="flex min-h-0 w-full min-w-0 max-w-md flex-col gap-3">
-        <div className="flex shrink-0 flex-col gap-1 px-1">
-          <GhostMark className="bb-fg-ghost mb-2 size-9 text-muted-foreground" />
-          <h2 className="text-sm font-medium text-foreground">
-            Summon a shell
-          </h2>
-          <p className="text-xs leading-relaxed text-muted-foreground">
-            Pick where it runs. Shells keep going while this window is hidden.
-          </p>
-        </div>
-        <ShellPicker
-          scopes={scopes}
-          recentScopeKeys={recentScopeKeys}
-          showHosts={showHosts}
-          onPick={onPick}
-          fill
-          className="min-h-0 flex-1 rounded-lg border border-border bg-background/40"
-        />
-      </div>
-    </div>
-  );
-}
-
 export function FloatingTerminal({
   rpc,
+  selection,
 }: {
   rpc: PluginRpcClient<typeof rpcContract>;
+  selection: { projectId: string | null; threadId: string | null };
 }) {
   const open = useSyncExternalStore(
     windowController.subscribe,
@@ -126,19 +94,49 @@ export function FloatingTerminal({
   );
 
   /**
-   * Below bb's own compact-viewport breakpoint the window becomes a sheet: it
-   * fills the viewport minus one inset, styles.css owns the geometry, and drag
-   * and resize are never installed. Everything else about it is unchanged.
+   * Use fullscreen below the requested size or BB's compact breakpoint.
+   * CSS owns this geometry; drag and resize are disabled.
    */
-  const sheet = useIsCompactViewport();
+  const { values: liveSettings } = useSettings();
+  const preferences = windowPreferences(liveSettings);
+  const preferencesRef = useRef(preferences);
+  preferencesRef.current = preferences;
+  const [viewport, setViewport] = useState({
+    width: window.innerWidth,
+    height: window.innerHeight,
+  });
+  const compact = useIsCompactViewport();
+  const sheet = compact || needsFullscreen(viewport, preferences);
   const sheetRef = useRef(sheet);
   sheetRef.current = sheet;
 
   const [state, dispatch] = useReducer(tabsReducer, emptyTabs);
   const [scopes, setScopes] = useState<ScopeOption[]>([]);
-  const [recentScopeKeys, setRecentScopeKeys] = useState<string[]>([]);
+  const [terminalContext, setTerminalContext] =
+    useState<TerminalContext>(globalContext);
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const [mode, setMode] = useState<"shell" | "switch">("shell");
+  const [actionsOpen, setActionsOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const creatingRef = useRef(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [resolvedRoute, setResolvedRoute] = useState<string | null>(null);
+  const routeKey = `${selection.projectId}:${selection.threadId}`;
+  const requestVersion = useRef(0);
+  const launchShell = (scopeKey: string) =>
+    rpc.call("openTab", { scopeKey, ...geometry() });
+  const pendingLaunches = useRef(
+    new Map<string, ReturnType<typeof launchShell>>(),
+  );
+  const selectionRef = useRef(selection);
+  selectionRef.current = selection;
+  const contextRef = useRef(terminalContext);
+  contextRef.current = terminalContext;
+  const shortcutEnabled = liveSettings?.shortcutEnabled !== false;
+  const overrideNativeShortcut = liveSettings?.overrideNativeShortcut === true;
+  const [nativeShortcuts, setNativeShortcuts] = useState<Shortcut[]>([]);
   const [fontSize, setFontSize] = useState(13);
-  const [shortcutEnabled, setShortcutEnabled] = useState(true);
   const [themeVersion, setThemeVersion] = useState(0);
   const [fitVersion, setFitVersion] = useState(0);
   /**
@@ -233,7 +231,7 @@ export function FloatingTerminal({
   // shell is always seeded at the 80x24 default instead of the window's real
   // size, and briefly mis-wraps until the first resize lands.
   const activeIdRef = useRef<string | null>(null);
-  activeIdRef.current = state.activeId;
+  activeIdRef.current = activeId;
 
   const geometry = useCallback(() => {
     const activeId = activeIdRef.current;
@@ -250,42 +248,155 @@ export function FloatingTerminal({
    * revision, so a slow reply simply loses to a newer one.
    */
   const sync = useCallback(async () => {
+    const version = ++requestVersion.current;
+    const route = selectionRef.current;
+    setLoading(true);
+    setLoadError(null);
+    setScopes([]);
+    setResolvedRoute(null);
     try {
+      const resolved = await rpc.call("resolveContext", route);
       const result = await rpc.call("init");
-      setScopes(result.scopes);
-      setRecentScopeKeys(result.recentScopeKeys);
+      if (version !== requestVersion.current) return;
+      setResolvedRoute(`${route.projectId}:${route.threadId}`);
+      setTerminalContext(resolved.context);
+      contextRef.current = resolved.context;
+      setScopes(resolved.scopes);
       setFontSize(result.prefs.fontSize);
-      setShortcutEnabled(result.prefs.shortcutEnabled);
       dispatch({ type: "synced", snapshot: result.snapshot });
-    } catch {
-      toast.error("Floating Ghostty could not reach its backend.");
+      const memory = readSelection();
+      const selected = preferredTerminal(
+        result.snapshot.tabs,
+        resolved.context,
+        memory.selected[contextKey(resolved.context)],
+        memory.recent,
+      );
+      if (selected) {
+        setActiveId(selected.terminalId);
+        rememberSelection(resolved.context, selected.terminalId);
+      } else {
+        setActiveId(null);
+        const destination = preferredScope(resolved.scopes, resolved.context);
+        if (!destination)
+          throw new Error(
+            "No machine is available. Connect a machine, then try again.",
+          );
+        if (!destination.online)
+          throw new Error(
+            `${destination.hostName} is offline. Reconnect it to start a shell here.`,
+          );
+        // Rapid toggle/route changes may leave a spawn in flight. Reuse it instead of leaking duplicate shells.
+        let launch = pendingLaunches.current.get(destination.key);
+        if (!launch) {
+          launch = rpc.call("openTab", {
+            scopeKey: destination.key,
+            ...geometry(),
+          });
+          pendingLaunches.current.set(destination.key, launch);
+          launch
+            .finally(() => pendingLaunches.current.delete(destination.key))
+            .catch(() => {});
+        }
+        const created = await launch;
+        dispatch({ type: "synced", snapshot: created.snapshot });
+        if (version !== requestVersion.current) return;
+        setActiveId(created.opened.terminalId);
+        rememberSelection(resolved.context, created.opened.terminalId);
+      }
+    } catch (error) {
+      if (version !== requestVersion.current) return;
+      setLoadError(
+        error instanceof Error ? error.message : "Could not open the terminal.",
+      );
+    } finally {
+      if (version === requestVersion.current) setLoading(false);
     }
-  }, [rpc]);
+  }, [rpc, geometry]);
 
   const openTab = useCallback(
     async (scopeKey: string) => {
+      if (creatingRef.current || !availableHere(scopeKey, contextRef.current))
+        return;
+      creatingRef.current = true;
+      const version = requestVersion.current;
+      const context = contextRef.current;
+      setCreating(true);
       try {
-        const result = await rpc.call("openTab", { scopeKey, ...geometry() });
-        dispatch({
-          type: "synced",
-          snapshot: result.snapshot,
-          focusId: result.opened.terminalId,
-        });
+        let launch = pendingLaunches.current.get(scopeKey);
+        if (!launch) {
+          launch = rpc.call("openTab", { scopeKey, ...geometry() });
+          pendingLaunches.current.set(scopeKey, launch);
+          launch
+            .finally(() => pendingLaunches.current.delete(scopeKey))
+            .catch(() => {});
+        }
+        const result = await launch;
+        dispatch({ type: "synced", snapshot: result.snapshot });
+        if (version !== requestVersion.current) return;
+        setActiveId(result.opened.terminalId);
+        rememberSelection(context, result.opened.terminalId);
+        setMode("shell");
+        setLoadError(null);
       } catch (error) {
         toast.error(
           error instanceof Error ? error.message : "Could not start a shell",
         );
-        void sync();
+      } finally {
+        creatingRef.current = false;
+        setCreating(false);
       }
     },
-    [rpc, sync, geometry],
+    [rpc, geometry],
   );
+
+  const createInContext = () => {
+    if (loading || resolvedRoute !== routeKey) return;
+    const scope = preferredScope(scopes, contextRef.current);
+    if (!scope?.online) {
+      toast.error(
+        scope
+          ? `${scope.hostName} is disconnected.`
+          : "No shell destination is available in this context.",
+      );
+      return;
+    }
+    setFindOpen(false);
+    setMode("shell");
+    void openTab(scope.key);
+  };
+
+  const promoteTab = async (target: "project" | "global") => {
+    if (!activeId) return;
+    try {
+      const result = await rpc.call("promoteTab", {
+        terminalId: activeId,
+        target,
+      });
+      dispatch({ type: "synced", snapshot: result.snapshot });
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : "Could not promote terminal",
+      );
+    }
+  };
 
   const closeTab = useCallback(
     async (terminalId: string) => {
       try {
         const result = await rpc.call("closeTab", { terminalId });
         dispatch({ type: "synced", snapshot: result.snapshot });
+        if (activeIdRef.current === terminalId) {
+          const memory = readSelection();
+          const next = preferredTerminal(
+            result.snapshot.tabs,
+            contextRef.current,
+            undefined,
+            memory.recent,
+          );
+          setActiveId(next?.terminalId ?? null);
+          if (next) rememberSelection(contextRef.current, next.terminalId);
+          else windowController.hide();
+        }
       } catch (error) {
         toast.error(
           error instanceof Error ? error.message : "Could not close the shell",
@@ -300,6 +411,7 @@ export function FloatingTerminal({
     async (terminalId: string) => {
       if (restarting.current.has(terminalId)) return;
       restarting.current.add(terminalId);
+      const version = requestVersion.current;
       try {
         const result = await rpc.call("restartTab", {
           terminalId,
@@ -310,6 +422,10 @@ export function FloatingTerminal({
           snapshot: result.snapshot,
           focusId: result.restarted.terminalId,
         });
+        if (version === requestVersion.current) {
+          setActiveId(result.restarted.terminalId);
+          rememberSelection(contextRef.current, result.restarted.terminalId);
+        }
       } catch (error) {
         toast.error(
           error instanceof Error
@@ -332,16 +448,24 @@ export function FloatingTerminal({
 
   useEffect(() => {
     setCtrlArmed(false);
-  }, [state.activeId]);
+  }, [activeId]);
 
   const selectTab = useCallback(
     (terminalId: string) => {
+      const tab = state.tabs.find((tab) => tab.terminalId === terminalId);
+      if (!tab || !availableHere(tab.scopeKey, contextRef.current)) return;
+      setActiveId(terminalId);
+      rememberSelection(contextRef.current, terminalId);
+      setMode("shell");
+      window.requestAnimationFrame(() =>
+        pumps.current.get(terminalId)?.focus(),
+      );
       dispatch({ type: "activated", terminalId });
       void rpc.call("setActiveTab", { terminalId }).catch(() => {
         // Persistence only; the client already switched.
       });
     },
-    [rpc],
+    [rpc, state.tabs],
   );
 
   // ----------------------------------------------------------------- init
@@ -361,9 +485,59 @@ export function FloatingTerminal({
   // Every open re-syncs: directories change, and a shell can die while the
   // window is hidden.
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      requestVersion.current++;
+      setMode("shell");
+      setActionsOpen(false);
+      setFindOpen(false);
+      return;
+    }
     void sync();
   }, [open, sync]);
+
+  // Navigation returns attention to BB, but never terminates a shell.
+  const previousRoute = useRef(`${selection.projectId}:${selection.threadId}`);
+  useEffect(() => {
+    const route = `${selection.projectId}:${selection.threadId}`;
+    if (route === previousRoute.current) return;
+    previousRoute.current = route;
+    requestVersion.current++;
+    setMode("shell");
+    setActiveId(null);
+    returnFocus.current = null;
+    windowController.hide();
+  }, [selection.projectId, selection.threadId]);
+
+  // The same Back/toggle round trip restores the exact element the operator left.
+  const returnFocus = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (open) {
+      returnFocus.current =
+        document.activeElement instanceof HTMLElement
+          ? document.activeElement
+          : null;
+    } else {
+      const target = returnFocus.current;
+      if (target?.isConnected && !rootRef.current?.contains(target))
+        target.focus({ preventScroll: true });
+      returnFocus.current = null;
+    }
+  }, [open]);
+
+  useEffect(() => {
+    const root = rootRef.current;
+    if (open && root && !root.contains(document.activeElement)) {
+      // Own keyboard focus during loading too; the shell takes over when ready.
+      root.focus({ preventScroll: true });
+    }
+  }, [mounted, open]);
+
+  useEffect(
+    () => () => {
+      requestVersion.current++;
+    },
+    [],
+  );
 
   // ------------------------------------------------------------- gestures
 
@@ -392,23 +566,49 @@ export function FloatingTerminal({
   // ---------------------------------------------------------- environment
 
   useEffect(() => {
+    nativeLauncherOverride.set(overrideNativeShortcut);
+    return () => nativeLauncherOverride.set(false);
+  }, [overrideNativeShortcut]);
+
+  useEffect(() => {
     // Coming back from the sheet, re-read the window's own geometry rather than
     // trusting memory: a frame first computed while the viewport was phone-sized
     // (a session that started narrow and was widened) would otherwise become a
     // 360px desktop window. Storage holds the last committed drag, or nothing,
     // in which case loadFrame derives the default for the viewport we are in now.
-    applyFrame(sheet ? frameRef.current : loadFrame());
+    applyFrame(sheet ? frameRef.current : openingFrame(preferencesRef.current));
     setFitVersion((version) => version + 1);
-  }, [applyFrame, mounted, sheet, maximized]);
+  }, [applyFrame, mounted, sheet]);
+
+  useEffect(() => {
+    applyFrame(frameRef.current);
+    setFitVersion((version) => version + 1);
+  }, [applyFrame, maximized]);
 
   useEffect(() => {
     if (!open) return;
-    applyFrame(clampFrame(frameRef.current));
+    if (
+      preferencesRef.current.centerOnOpen ||
+      preferencesRef.current.customWindowSize
+    )
+      setMaximized(false);
+    applyFrame(openingFrame(preferencesRef.current));
     setFitVersion((version) => version + 1);
   }, [open, applyFrame]);
 
   useEffect(() => {
-    const onResize = () => applyFrame(clampFrame(frameRef.current));
+    const onResize = () => {
+      setViewport({ width: window.innerWidth, height: window.innerHeight });
+      // Do not clamp and lose the saved desktop geometry on a fullscreen viewport.
+      if (
+        !needsFullscreen(
+          { width: window.innerWidth, height: window.innerHeight },
+          preferencesRef.current,
+        )
+      ) {
+        applyFrame(clampFrame(frameRef.current));
+      }
+    };
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
   }, [applyFrame]);
@@ -437,23 +637,90 @@ export function FloatingTerminal({
   }, []);
 
   useEffect(() => {
-    if (!shortcutEnabled) return;
+    if (!overrideNativeShortcut) {
+      setNativeShortcuts([]);
+      return;
+    }
+    let disposed = false;
+    const refresh = () =>
+      rpc
+        .call("terminalShortcuts")
+        .then((bindings) => {
+          if (!disposed) setNativeShortcuts(bindings);
+        })
+        .catch(() => {});
+    void refresh();
+    window.addEventListener("focus", refresh);
+    const interval = window.setInterval(refresh, 30000);
+    return () => {
+      disposed = true;
+      window.clearInterval(interval);
+      window.removeEventListener("focus", refresh);
+    };
+  }, [rpc, overrideNativeShortcut]);
+
+  useEffect(() => {
+    const mac = /Mac|iPhone|iPad/.test(navigator.platform);
     const onKeyDown = (event: KeyboardEvent) => {
+      if (event.isComposing) return;
+      const toggle =
+        (!overrideNativeShortcut &&
+          shortcutEnabled &&
+          isAlternativeToggle(event)) ||
+        (overrideNativeShortcut &&
+          nativeShortcuts.some((shortcut) =>
+            matchesShortcut(event, shortcut, mac),
+          ));
+      const switcher = open && isSwitcherShortcut(event, mac);
+      if (!toggle && !switcher) return;
+      // Independent BB dialogs keep their own keyboard handling.
+      const foreignDialog = (event.target as Element | null)?.closest?.(
+        '[role="dialog"]',
+      );
       if (
-        event.ctrlKey &&
-        event.shiftKey &&
-        !event.metaKey &&
-        !event.altKey &&
-        event.code === "Backquote"
-      ) {
-        event.preventDefault();
-        windowController.toggle();
+        foreignDialog &&
+        !rootRef.current?.contains(foreignDialog) &&
+        !foreignDialog.querySelector(".bb-fg-actions-menu")
+      )
+        return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (event.repeat || (!toggle && (loading || resolvedRoute !== routeKey)))
+        return;
+      if (toggle) windowController.toggle();
+      else {
+        setFindOpen(false);
+        setMode((value) => (value === "switch" ? "shell" : "switch"));
       }
     };
     window.addEventListener("keydown", onKeyDown, { capture: true });
     return () =>
       window.removeEventListener("keydown", onKeyDown, { capture: true });
-  }, [shortcutEnabled]);
+  }, [
+    shortcutEnabled,
+    overrideNativeShortcut,
+    nativeShortcuts,
+    open,
+    loading,
+    resolvedRoute,
+    routeKey,
+  ]);
+
+  useEffect(() => {
+    if (
+      open &&
+      mode === "shell" &&
+      !actionsOpen &&
+      !findOpen &&
+      !loading &&
+      activeId
+    ) {
+      const raf = window.requestAnimationFrame(() =>
+        pumps.current.get(activeId)?.focus(),
+      );
+      return () => window.cancelAnimationFrame(raf);
+    }
+  }, [open, mode, actionsOpen, findOpen, loading, activeId]);
 
   // --------------------------------------------------------------- render
 
@@ -577,13 +844,13 @@ export function FloatingTerminal({
   const lastActiveRef = useRef<string | null>(null);
   useEffect(() => {
     const previous = lastActiveRef.current;
-    lastActiveRef.current = state.activeId;
-    if (previous !== null && previous !== state.activeId) {
+    lastActiveRef.current = activeId;
+    if (previous !== null && previous !== activeId) {
       pumps.current.get(previous)?.clearSearch();
       setFindOpen(false);
       setFindResults(null);
     }
-  }, [state.activeId]);
+  }, [activeId]);
 
   const onScrollState = useCallback(
     (terminalId: string, tabAtBottom: boolean) => {
@@ -596,7 +863,7 @@ export function FloatingTerminal({
   // reports otherwise the safe assumption is "at the prompt".
   useEffect(() => {
     setAtBottom(true);
-  }, [state.activeId]);
+  }, [activeId]);
 
   const onToolbarKey = useCallback(
     (key: ToolbarKey) => {
@@ -641,27 +908,35 @@ export function FloatingTerminal({
 
   const onCtrlArmed = useCallback((armed: boolean) => setCtrlArmed(armed), []);
 
-  // A bare ~ means nothing once there is more than one machine.
-  const showHosts = new Set(scopes.map((scope) => scope.hostName)).size > 1;
+  const availableTabs =
+    resolvedRoute === routeKey
+      ? state.tabs.filter((tab) => availableHere(tab.scopeKey, terminalContext))
+      : [];
+  const activeTab =
+    availableTabs.find((tab) => tab.terminalId === activeId) ?? null;
+  const visited = useRef(new Set<string>());
+  if (activeTab && !loading) visited.current.add(activeTab.terminalId);
+  const dismissPicker = () => setMode("shell");
 
   if (!mounted) return null;
 
   return (
     <TooltipProvider delayDuration={400}>
-      {/* Only the sheet gets a scrim. The desktop window is deliberately
-          non-modal — bb stays usable behind it — but at this width the sheet
-          covers nearly everything, so a blurred backdrop is what makes it read
-          as one layer above the app rather than a panel welded to it. */}
-      {sheet ? (
+      {/* Clicking the surroundings means Back; every shell keeps running. */}
+      {
         <div
           className="bb-fg-backdrop"
           data-state={open && armed ? "open" : "closed"}
           aria-hidden="true"
           onPointerDown={hide}
         />
-      ) : null}
+      }
       <div
         ref={rootRef}
+        tabIndex={-1}
+        onKeyDown={isolateTerminalKey}
+        onKeyUp={isolateTerminalKey}
+        onKeyPress={isolateTerminalKey}
         role="dialog"
         // Non-modal on purpose: the point of this window is that bb stays
         // usable behind it, so it must not read as a focus trap.
@@ -687,12 +962,27 @@ export function FloatingTerminal({
             setMaximized((value) => !value);
           }}
         >
-          <TabBar
-            tabs={state.tabs}
-            activeId={state.activeId}
-            scopes={scopes}
-            recentScopeKeys={recentScopeKeys}
-            showHosts={showHosts}
+          <TerminalHeader
+            tab={activeTab}
+            owner={
+              activeTab
+                ? scopeLabel(activeTab.scopeKey, scopes)
+                : "Floating Ghostty"
+            }
+            onSwitch={() => {
+              setFindOpen(false);
+              setMode("switch");
+            }}
+            onCreate={createInContext}
+            onPromote={(target) => void promoteTab(target)}
+            onHide={hide}
+            onFind={openFind}
+            onRestart={() => {
+              if (activeId) void restartTab(activeId);
+            }}
+            onEnd={() => {
+              if (activeId) void closeTab(activeId);
+            }}
             maximize={
               sheet
                 ? null
@@ -701,39 +991,47 @@ export function FloatingTerminal({
                     toggle: () => setMaximized((value) => !value),
                   }
             }
-            onSelect={selectTab}
-            onClose={(terminalId) => void closeTab(terminalId)}
-            onNewTab={(scopeKey) => void openTab(scopeKey)}
-            onRestart={() => {
-              if (state.activeId !== null) void restartTab(state.activeId);
-            }}
-            onHide={hide}
+            busy={loading || creating}
+            visible={open}
+            onMenuChange={setActionsOpen}
           />
         </div>
 
-        <div className="relative min-h-0 flex-1 bg-card px-2 py-1.5">
-          {state.tabs.map((tab) => (
-            <TerminalView
-              key={tab.terminalId}
-              rpc={rpc}
-              terminalId={tab.terminalId}
-              visible={open && tab.terminalId === state.activeId}
-              fontSize={fontSize}
-              themeVersion={themeVersion}
-              fitVersion={fitVersion}
-              onStatus={onStatus}
-              onTitle={onTitle}
-              onCtrlArmed={onCtrlArmed}
-              onFindRequested={openFind}
-              onScrollState={onScrollState}
-              onSearchResults={onSearchResults}
-              onRequestRestart={onRequestRestart}
-              onToggleRequested={hide}
-              onPumpReady={onPumpReady}
-              onPumpGone={onPumpGone}
-            />
-          ))}
-          {findOpen && state.tabs.length > 0 ? (
+        <div className="bb-fg-terminal-body relative min-h-0 flex-1">
+          {state.tabs
+            .filter((tab) => visited.current.has(tab.terminalId))
+            .map((tab) => (
+              <TerminalView
+                key={tab.terminalId}
+                rpc={rpc}
+                terminalId={tab.terminalId}
+                visible={
+                  open && !loading && activeTab?.terminalId === tab.terminalId
+                }
+                focused={
+                  open &&
+                  !loading &&
+                  mode === "shell" &&
+                  !actionsOpen &&
+                  !findOpen &&
+                  activeTab?.terminalId === tab.terminalId
+                }
+                fontSize={fontSize}
+                themeVersion={themeVersion}
+                fitVersion={fitVersion}
+                onStatus={onStatus}
+                onTitle={onTitle}
+                onCtrlArmed={onCtrlArmed}
+                onFindRequested={openFind}
+                onScrollState={onScrollState}
+                onSearchResults={onSearchResults}
+                onRequestRestart={onRequestRestart}
+                onToggleRequested={hide}
+                onPumpReady={onPumpReady}
+                onPumpGone={onPumpGone}
+              />
+            ))}
+          {findOpen && activeTab !== null ? (
             <FindBar
               query={findQuery}
               results={findResults}
@@ -745,7 +1043,7 @@ export function FloatingTerminal({
           ) : null}
 
           {/* Parked in history while output may still be arriving below. */}
-          {!atBottom && state.tabs.length > 0 ? (
+          {!atBottom && activeTab !== null && mode === "shell" ? (
             <button
               type="button"
               className="bb-fg-pill"
@@ -763,19 +1061,51 @@ export function FloatingTerminal({
             </button>
           ) : null}
 
-          {state.tabs.length === 0 ? (
-            <EmptyState
+          {loading ? (
+            <div className="bb-fg-state" role="status">
+              <span className="bb-fg-loading-dot" />
+              Opening terminal…
+            </div>
+          ) : null}
+          {!loading && loadError ? (
+            <div className="bb-fg-state" role="alert">
+              <p>{loadError}</p>
+              <div>
+                <button onClick={() => void sync()}>Try again</button>
+              </div>
+            </div>
+          ) : null}
+          {!loading && !loadError && !activeTab ? (
+            <div className="bb-fg-state">
+              <p>No terminal selected.</p>
+              <button onClick={createInContext} disabled={creating}>
+                Start a shell
+              </button>
+            </div>
+          ) : null}
+          {mode === "shell" && activeTab?.status === "exited" ? (
+            <div className="bb-fg-exit-state" role="status">
+              {activeTab.statusDetail ?? "Shell exited"}
+              <button onClick={() => void restartTab(activeTab.terminalId)}>
+                Restart shell
+              </button>
+            </div>
+          ) : null}
+          {mode === "switch" ? (
+            <TerminalSwitcher
+              tabs={availableTabs}
               scopes={scopes}
-              recentScopeKeys={recentScopeKeys}
-              showHosts={showHosts}
-              onPick={(scopeKey) => void openTab(scopeKey)}
+              context={terminalContext}
+              activeId={activeId}
+              onSelect={selectTab}
+              onDismiss={dismissPicker}
             />
           ) : null}
         </div>
 
         {/* Only where the keys are actually missing, and only once there is a
             shell to send them to. */}
-        {sheet && state.tabs.length > 0 ? (
+        {sheet && !loading && activeTab !== null && mode === "shell" ? (
           <KeyToolbar ctrlArmed={ctrlArmed} onKey={onToolbarKey} />
         ) : null}
 

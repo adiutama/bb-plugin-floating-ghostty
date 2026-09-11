@@ -34,6 +34,61 @@ try {
         scope.hostId === process.env.BB_SMOKE_HOST_ID),
   );
   assert(scope, "No connected home directory available");
+  // Exercise the real context adapter and environment-scoped PTY creation too.
+  const global = await rpc("resolveContext", {
+    projectId: null,
+    threadId: null,
+  });
+  assert(global.scopes.every((scope) => scope.kind === "home"));
+  if (!initial.prefs.overrideNativeShortcut) {
+    assert.deepEqual(await rpc("terminalShortcuts", null), []);
+  }
+  if (process.env.BB_THREAD_ID) {
+    const resolved = await rpc("resolveContext", {
+      projectId: process.env.BB_PROJECT_ID ?? null,
+      threadId: process.env.BB_THREAD_ID,
+    });
+    const current = resolved.scopes.find(
+      (scope) =>
+        scope.key ===
+        `worktree:${resolved.context.projectId}:${resolved.context.environmentId}`,
+    );
+    if (current?.online) {
+      const worktree = await rpc("openTab", {
+        scopeKey: current.key,
+        cols: 80,
+        rows: 24,
+      });
+      owned.add(worktree.opened.terminalId);
+      assert.equal(
+        worktree.opened.cwd,
+        current.cwd,
+        "Worktree terminal started in the wrong checkout",
+      );
+      assert.equal(worktree.opened.scopeKey, current.key);
+      const promoted = await rpc("promoteTab", {
+        terminalId: worktree.opened.terminalId,
+        target: "global",
+      });
+      const promotedTab = promoted.snapshot.tabs.find(
+        (tab) => tab.terminalId === worktree.opened.terminalId,
+      );
+      assert.equal(promotedTab.scopeKey, `home:${current.hostId}`);
+      assert.equal(promotedTab.cwd, worktree.opened.cwd);
+      const { restarted } = await rpc("restartTab", {
+        terminalId: worktree.opened.terminalId,
+        cols: 80,
+        rows: 24,
+      });
+      owned.delete(worktree.opened.terminalId);
+      owned.add(restarted.terminalId);
+      assert.equal(restarted.scopeKey, promotedTab.scopeKey);
+      assert.equal(restarted.cwd, current.cwd);
+      console.log(
+        "PASS: Global visibility, opt-in shortcut default, current worktree launch, Global promotion, and original restart directory",
+      );
+    }
+  }
   const tokenResponse = await fetch(`${plugin}/token`, {
     method: "POST",
     headers: { "content-type": "application/json" },

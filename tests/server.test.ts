@@ -10,8 +10,8 @@ const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0)) await cleanup();
 });
-async function setup() {
-  const host = createFakePluginHost({ pluginId: "floating-ghostty" });
+async function setup(settings: Record<string, boolean> = {}) {
+  const host = createFakePluginHost({ pluginId: "floating-ghostty", settings });
   cleanups.push(() => host.harness.lifecycle.dispose());
   const sessions = new Map<string, Record<string, unknown>>();
   let next = 0;
@@ -163,5 +163,212 @@ describe("Floating Ghostty backend", () => {
     );
     expect(scan.violations).toEqual([]);
     expect(scan.privateDependencies).toEqual([]);
+  });
+});
+
+it("resolves context from the thread and offers only Global plus its project and worktrees", async () => {
+  const { call, harness } = await setup();
+  harness.inspection.sdk.stub("projects.list", async () => [
+    {
+      id: "A",
+      name: "Project A",
+      sources: [{ hostId: "local", path: "/a", isDefault: true }],
+    },
+    {
+      id: "B",
+      name: "Project B",
+      sources: [{ hostId: "local", path: "/b", isDefault: true }],
+    },
+  ]);
+  harness.inspection.sdk.stub("threads.get", async () => ({
+    projectId: "A",
+    environmentId: "one",
+  }));
+  harness.inspection.sdk.stub("threads.list", async () => [
+    { environmentId: "one" },
+    { environmentId: "two" },
+    { environmentId: "one" },
+  ]);
+  harness.inspection.sdk.stub(
+    "environments.get",
+    async ({ environmentId }: { environmentId: string }) => ({
+      id: environmentId,
+      projectId: "A",
+      name: environmentId,
+      path: `/a/${environmentId}`,
+      hostId: "local",
+      status: "ready",
+    }),
+  );
+  const result = (await call("resolveContext", {
+    projectId: "B",
+    threadId: "thread-one",
+  })) as {
+    context: { projectId: string; environmentId: string };
+    scopes: { key: string }[];
+  };
+  expect(result.context).toMatchObject({
+    projectId: "A",
+    environmentId: "one",
+  });
+  expect(result.scopes.map((scope) => scope.key)).toEqual([
+    "project:A",
+    "home:local",
+    "worktree:A:one",
+    "worktree:A:two",
+  ]);
+  expect(harness.inspection.sdk.callsTo("environments.get")).toHaveLength(2);
+  const global = (await call("resolveContext", {
+    projectId: null,
+    threadId: null,
+  })) as { scopes: { key: string }[] };
+  expect(global.scopes.map((scope) => scope.key)).toEqual(["home:local"]);
+});
+
+it("creates a worktree terminal through its environment identity and rejects a forged project owner", async () => {
+  const { call, harness } = await setup();
+  harness.inspection.sdk.stub("environments.get", async () => ({
+    id: "one",
+    projectId: "A",
+    name: "feature",
+    path: "/a/feature",
+    hostId: "local",
+    status: "ready",
+  }));
+  await call("openTab", { scopeKey: "worktree:A:one", cols: 80, rows: 24 });
+  expect(
+    harness.inspection.sdk.callsTo("terminals.create")[0]?.[0],
+  ).toMatchObject({ scope: { kind: "environment", environmentId: "one" } });
+  await expect(
+    call("openTab", { scopeKey: "worktree:B:one", cols: 80, rows: 24 }),
+  ).rejects.toThrow(/no longer available/);
+});
+
+it("never falls back to a project shell when the current environment cannot be resolved", async () => {
+  const { call, harness } = await setup();
+  harness.inspection.sdk.stub("projects.list", async () => [
+    {
+      id: "A",
+      name: "A",
+      sources: [{ hostId: "local", path: "/a", isDefault: true }],
+    },
+  ]);
+  harness.inspection.sdk.stub("threads.get", async () => ({
+    projectId: "A",
+    environmentId: "missing",
+  }));
+  harness.inspection.sdk.stub("threads.list", async () => []);
+  harness.inspection.sdk.stub("environments.get", async () => {
+    throw new Error("Disconnected");
+  });
+  await expect(
+    call("resolveContext", { projectId: "A", threadId: "thread" }),
+  ).rejects.toThrow(/current worktree is unavailable/);
+  expect(harness.inspection.sdk.callsTo("terminals.create")).toHaveLength(0);
+});
+
+it("keeps native shortcut override off by default and follows BB's configured shortcut when opted in", async () => {
+  const disabled = await setup();
+  expect(await disabled.call("terminalShortcuts", null)).toEqual([]);
+  expect(disabled.harness.inspection.sdk.callsTo("system.config")).toHaveLength(
+    0,
+  );
+  const enabled = await setup({ overrideNativeShortcut: true });
+  const custom = {
+    key: "j",
+    mod: true,
+    meta: false,
+    control: false,
+    alt: false,
+    shift: false,
+  };
+  enabled.harness.inspection.sdk.stub("system.config", async () => ({
+    keybindingOverrides: [{ command: "terminal.open", shortcut: custom }],
+    keybindings: [],
+  }));
+  expect(await enabled.call("terminalShortcuts", null)).toEqual([custom]);
+  enabled.harness.inspection.sdk.stub("system.config", async () => ({
+    keybindingOverrides: [{ command: "terminal.open", shortcut: null }],
+    keybindings: [],
+  }));
+  expect(await enabled.call("terminalShortcuts", null)).toEqual([]);
+});
+
+it("promotes ownership without replacing the process and preserves its launch context across reload and restart", async () => {
+  const { call, harness, sessions } = await setup();
+  const environment = {
+    id: "one",
+    projectId: "A",
+    name: "feature",
+    path: "/a/feature",
+    hostId: "local",
+    status: "ready",
+  };
+  harness.inspection.sdk.stub("environments.get", async () => environment);
+  const { opened } = (await call("openTab", {
+    scopeKey: "worktree:A:one",
+    cols: 80,
+    rows: 24,
+  })) as any;
+  const before = ((await call("init", null)) as any).snapshot.tabs[0];
+  const project = (await call("promoteTab", {
+    terminalId: opened.terminalId,
+    target: "project",
+  })) as any;
+  expect(project.snapshot.tabs[0]).toEqual({
+    ...before,
+    scopeKey: "project:A",
+  });
+  const global = (await call("promoteTab", {
+    terminalId: opened.terminalId,
+    target: "global",
+  })) as any;
+  expect(global.snapshot.tabs[0]).toEqual({
+    ...before,
+    scopeKey: "home:local",
+  });
+  expect(harness.inspection.sdk.callsTo("terminals.create")).toHaveLength(1);
+  expect(harness.inspection.sdk.callsTo("terminals.close")).toHaveLength(0);
+  await expect(
+    call("promoteTab", { terminalId: opened.terminalId, target: "project" }),
+  ).rejects.toThrow(/cannot be promoted/);
+  await expect(
+    call("promoteTab", { terminalId: "foreign", target: "global" }),
+  ).rejects.toThrow(/does not belong/);
+  const reloaded = await harness.lifecycle.reload(plugin);
+  cleanups.push(() => reloaded.harness.lifecycle.dispose());
+  const sdk = reloaded.harness.inspection.sdk;
+  sdk.stub("hosts.list", async () => [
+    { id: "local", name: "Local", status: "connected" },
+  ]);
+  sdk.stub("projects.list", async () => []);
+  sdk.stub("environments.get", async () => environment);
+  sdk.stub("terminals.get", async ({ terminalId }: { terminalId: string }) =>
+    sessions.get(terminalId),
+  );
+  sdk.stub("terminals.close", async () => ({}));
+  sdk.stub("terminals.create", async () => {
+    const session = { ...sessions.get(opened.terminalId), id: "restarted" };
+    sessions.set("restarted", session);
+    return session;
+  });
+  const afterReload = (await reloaded.harness.behavior.callRpc(
+    "init",
+    null,
+  )) as any;
+  expect(afterReload.snapshot.tabs[0]).toMatchObject({
+    terminalId: opened.terminalId,
+    scopeKey: "home:local",
+    cwd: opened.cwd,
+    hostName: "Local",
+  });
+  const { restarted } = (await reloaded.harness.behavior.callRpc("restartTab", {
+    terminalId: opened.terminalId,
+    cols: 80,
+    rows: 24,
+  })) as any;
+  expect(restarted.scopeKey).toBe("home:local");
+  expect(sdk.callsTo("terminals.create")[0]?.[0]).toMatchObject({
+    scope: { kind: "environment", environmentId: "one" },
   });
 });

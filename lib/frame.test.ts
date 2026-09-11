@@ -6,7 +6,15 @@
 // width comes back 393px wide, so the sheet has to keep the stored frame away
 // from it entirely.
 import { afterEach, describe, expect, it } from "vitest";
-import { clampFrame, defaultFrame, loadFrame, saveFrame } from "./frame";
+import {
+  clampFrame,
+  defaultFrame,
+  loadFrame,
+  saveFrame,
+  windowPreferences,
+  openingFrame,
+  needsFullscreen,
+} from "./frame";
 
 interface FakeStorage {
   getItem(key: string): string | null;
@@ -38,28 +46,23 @@ afterEach(() => {
 });
 
 describe("defaultFrame", () => {
-  it("rests in the bottom-left corner with the same gap on both edges", () => {
+  it("centers the overlay while leaving the surrounding context visible", () => {
     stubWindow(1440, 900);
     const frame = defaultFrame();
-    expect(frame.x).toBe(40);
-    // The gap underneath equals the gap on the leading edge; that symmetry is
-    // what makes the corner read as a corner.
-    expect(window.innerHeight - (frame.y + frame.height)).toBe(40);
+    expect(frame.x).toBe((window.innerWidth - frame.width) / 2);
+    expect(frame.y).toBe((window.innerHeight - frame.height) / 2);
   });
 
   it("stops growing once the screen is big enough", () => {
     stubWindow(3840, 2160);
-    expect(defaultFrame()).toMatchObject({ width: 760, height: 460 });
+    expect(defaultFrame()).toMatchObject({ width: 1100, height: 720 });
   });
 
   it("gives back a phone-sized frame on a phone-sized viewport", () => {
     stubWindow(393, 800);
     const frame = defaultFrame();
-    // 393 - 2*40 is under the 360 minimum, so the floor wins rather than the
-    // gutter. Either way it is nowhere near 760 — which is precisely why this
-    // must never become the remembered desktop geometry. See the sheet guard
-    // in floating-terminal.tsx.
-    expect(frame.width).toBe(360);
+    // This fallback is never saved while fullscreen owns the layout.
+    expect(frame.width).toBe(393);
     expect(frame.width).toBeLessThan(760);
   });
 });
@@ -130,9 +133,78 @@ describe("loadFrame", () => {
 
   it("ignores junk rather than throwing the window away", () => {
     const store = new Map<string, string>([
-      ["bb-plugin-floating-ghostty:frame:v5", '{"x":"nope"}'],
+      ["bb-plugin-floating-ghostty:frame:v6", '{"x":"nope"}'],
     ]);
     stubWindow(1440, 900, store);
     expect(loadFrame()).toEqual(defaultFrame());
+  });
+});
+
+describe("opening preferences", () => {
+  it("remembers geometry by default and ignores custom dimensions until opted in", () => {
+    stubWindow(1440, 900);
+    saveFrame({ x: 80, y: 40, width: 900, height: 600 });
+    expect(
+      openingFrame(windowPreferences({ windowWidth: 800, windowHeight: 500 })),
+    ).toEqual({ x: 80, y: 40, width: 900, height: 600 });
+  });
+  it("recenters each opening while retaining the user's resized dimensions", () => {
+    stubWindow(1440, 900);
+    saveFrame({ x: 80, y: 40, width: 900, height: 600 });
+    expect(openingFrame(windowPreferences({ centerOnOpen: true }))).toEqual({
+      x: 270,
+      y: 150,
+      width: 900,
+      height: 600,
+    });
+  });
+  it("uses exact custom dimensions on first open even with little surrounding space", () => {
+    stubWindow(1024, 768);
+    expect(
+      openingFrame(
+        windowPreferences({
+          customWindowSize: true,
+          windowWidth: 1000,
+          windowHeight: 750,
+        }),
+      ),
+    ).toEqual({ x: 12, y: 9, width: 1000, height: 750 });
+  });
+  it("changes size independently from position and can combine both opt-ins", () => {
+    stubWindow(1440, 900);
+    saveFrame({ x: 80, y: 40, width: 900, height: 600 });
+    const values = {
+      customWindowSize: true,
+      windowWidth: 800,
+      windowHeight: 500,
+    };
+    expect(openingFrame(windowPreferences(values))).toEqual({
+      x: 80,
+      y: 40,
+      width: 800,
+      height: 500,
+    });
+    expect(
+      openingFrame(windowPreferences({ ...values, centerOnOpen: true })),
+    ).toEqual({ x: 320, y: 200, width: 800, height: 500 });
+  });
+  it("fills the screen if either viewport dimension is too small", () => {
+    const size = windowPreferences({
+      customWindowSize: true,
+      windowWidth: 800,
+      windowHeight: 500,
+    });
+    expect(needsFullscreen({ width: 799, height: 900 }, size)).toBe(true);
+    expect(needsFullscreen({ width: 1440, height: 499 }, size)).toBe(true);
+    expect(needsFullscreen({ width: 800, height: 500 }, size)).toBe(false);
+  });
+  it("bounds invalid saved settings at the frontend boundary", () => {
+    expect(
+      windowPreferences({
+        customWindowSize: true,
+        windowWidth: -1,
+        windowHeight: Infinity,
+      }),
+    ).toMatchObject({ width: 360, height: 720 });
   });
 });

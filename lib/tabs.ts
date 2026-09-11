@@ -102,14 +102,23 @@ export function tabsReducer(state: TabsState, action: TabsAction): TabsState {
       const tabs = action.snapshot.tabs.map((tab) => {
         const existing = previous.get(tab.terminalId);
         if (existing === undefined) return fromServer(tab);
-        // Naming is the server's half of the split, so it has to flow through
+        // Naming and ownership are the server's half of the split and flow through
         // to a tab the client already knows; status stays the client's. Reuse
         // the existing object when neither changed, or every snapshot would
         // re-render the whole strip.
-        if (existing.shellTitle === tab.shellTitle && existing.label === tab.label) {
+        if (
+          existing.shellTitle === tab.shellTitle &&
+          existing.label === tab.label &&
+          existing.scopeKey === tab.scopeKey
+        ) {
           return existing;
         }
-        return { ...existing, label: tab.label, shellTitle: tab.shellTitle };
+        return {
+          ...existing,
+          scopeKey: tab.scopeKey,
+          label: tab.label,
+          shellTitle: tab.shellTitle,
+        };
       });
 
       const has = (id: string | null | undefined) =>
@@ -136,7 +145,9 @@ export function tabsReducer(state: TabsState, action: TabsAction): TabsState {
       // Bail when unchanged: a failing poll re-reports the same error every
       // 320ms, and without this check that re-rendered the whole window at
       // ~3Hz for as long as the backend stayed unreachable.
-      const tab = state.tabs.find((entry) => entry.terminalId === action.terminalId);
+      const tab = state.tabs.find(
+        (entry) => entry.terminalId === action.terminalId,
+      );
       if (
         !tab ||
         (tab.status === action.status && tab.statusDetail === action.detail)

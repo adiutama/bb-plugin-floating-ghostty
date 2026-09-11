@@ -55,6 +55,7 @@ export class TerminalPump {
   private writeChain: Promise<unknown> = Promise.resolve();
   private status: TabStatus = "connecting";
   private visible = false;
+  private wantsFocus = true;
   private started = false;
   private disposed = false;
   private replayWrites = 0;
@@ -73,6 +74,27 @@ export class TerminalPump {
     options.container.dataset.renderer = "ghostty";
     this.applyFont();
     this.refreshTheme();
+    // Keyboard isolation stops bubbling before Wterm's document-level listener.
+    // Track the link activation modifier locally as well, before that boundary.
+    const trackLinkModifier = (event: KeyboardEvent) => {
+      options.container.classList.toggle(
+        "link-modifier-active",
+        navigator.platform.startsWith("Mac") ? event.metaKey : event.ctrlKey,
+      );
+    };
+    for (const type of ["keydown", "keyup"] as const) {
+      options.container.addEventListener(type, trackLinkModifier, {
+        capture: true,
+        signal: this.abort.signal,
+      });
+    }
+    options.container.addEventListener(
+      "blur",
+      () => {
+        options.container.classList.remove("link-modifier-active");
+      },
+      { capture: true, signal: this.abort.signal },
+    );
     options.container.addEventListener("keydown", this.onKeyDown, {
       capture: true,
       signal: this.abort.signal,
@@ -135,6 +157,8 @@ export class TerminalPump {
       this.fit();
       if (this.visible) {
         this.start();
+      }
+      if (this.visible && this.wantsFocus) {
         this.focus();
       } else {
         this.blur();
@@ -548,8 +572,13 @@ export class TerminalPump {
     );
     this.terminal.resize(cols, rows);
   }
+  setFocused(focused: boolean): void {
+    this.wantsFocus = focused;
+    if (focused) this.focus();
+    else this.blur();
+  }
   focus(): void {
-    if (this.visible) this.terminal?.focus();
+    if (this.visible && this.wantsFocus) this.terminal?.focus();
   }
   cols(): number {
     return Math.max(this.terminal?.cols ?? 80, 2);
