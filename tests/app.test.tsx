@@ -929,6 +929,35 @@ it("edits the environment belonging to a project terminal", async () => {
   }
 }, 40000);
 
+it("opens the active project's environment from the header", async () => {
+  const slot = await setup([tab("current", "worktree:A:one")]);
+  try {
+    await act(async () => toggle());
+    await slot.findByRole("textbox", { name: "Shell current" });
+
+    const environment = slot.getByRole("button", {
+      name: "Edit project environment",
+    });
+    expect(environment.getAttribute("aria-pressed")).toBe("false");
+    await act(async () => fireEvent.click(environment));
+
+    await slot.findByRole("textbox", {
+      name: "Environment variables for Project A",
+    });
+    expect(environment.getAttribute("aria-pressed")).toBe("true");
+    await act(async () => fireEvent.click(environment));
+
+    expect(
+      slot.queryByRole("dialog", { name: "Project environment" }),
+    ).toBeNull();
+    expect(
+      slot.queryByRole("dialog", { name: "Switch terminal" }),
+    ).toBeNull();
+  } finally {
+    slot.lifecycle.unmount();
+  }
+}, 40000);
+
 it("manages a filtered inactive terminal without changing shells and preserves the selector on return", async () => {
   const slot = await setup([
     tab("current", "worktree:A:one"),
@@ -939,7 +968,7 @@ it("manages a filtered inactive terminal without changing shells and preserves t
     const shell = await slot.findByRole("textbox", { name: "Shell current" });
     const header = slot.container.querySelector(".bb-fg-header")!;
     expect(within(header as HTMLElement).getAllByRole("button")).toHaveLength(
-      2,
+      3,
     );
     await act(async () => switcher(shell));
     const search = slot.getByPlaceholderText("Search terminals");

@@ -5,15 +5,19 @@ import { tabName, type TabState } from "../lib/tabs";
 export function TerminalHeader({
   tab,
   onSwitch,
+  onEnvironment,
   onHide,
   busy,
   expanded,
+  environmentOpen,
 }: {
   tab: TabState | null;
   onSwitch: () => void;
+  onEnvironment?: () => void;
   onHide: () => void;
   busy: boolean;
   expanded: boolean;
+  environmentOpen: boolean;
 }) {
   return (
     <div className="bb-fg-header">
@@ -33,6 +37,20 @@ export function TerminalHeader({
         <Icon name="ChevronDown" className="size-3.5 shrink-0" />
       </button>
       <span className="bb-fg-header-space" />
+      {onEnvironment ? (
+        <button
+          className="bb-fg-header-icon"
+          type="button"
+          data-no-drag=""
+          data-active={environmentOpen ? "true" : undefined}
+          onClick={onEnvironment}
+          title="Project environment"
+          aria-label="Edit project environment"
+          aria-pressed={environmentOpen}
+        >
+          <Icon name="Variable" className="size-4" />
+        </button>
+      ) : null}
       <button
         className="bb-fg-header-icon"
         type="button"

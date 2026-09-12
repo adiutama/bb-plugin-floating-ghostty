@@ -123,6 +123,7 @@ export function FloatingTerminal({
     "shell",
   );
   const [managedId, setManagedId] = useState<string | null>(null);
+  const managementReturnMode = useRef<"shell" | "switch">("switch");
   const [loading, setLoading] = useState(false);
   const [creating, setCreating] = useState(false);
   const creatingRef = useRef(false);
@@ -997,7 +998,7 @@ export function FloatingTerminal({
   if (activeTab && !loading) visited.current.add(activeTab.terminalId);
   const managedTab = availableTabs.find((tab) => tab.terminalId === managedId);
   const dismissPicker = () => setMode("shell");
-  const dismissManagement = () => setMode("switch");
+  const dismissManagement = () => setMode(managementReturnMode.current);
 
   if (!mounted) return null;
 
@@ -1048,9 +1049,23 @@ export function FloatingTerminal({
               setFindOpen(false);
               setMode((value) => (value === "switch" ? "shell" : "switch"));
             }}
+            onEnvironment={
+              activeTab && ownerOf(activeTab.scopeKey).projectId
+                ? () => {
+                    if (mode === "environment") {
+                      setMode("shell");
+                      return;
+                    }
+                    managementReturnMode.current = "shell";
+                    setManagedId(activeTab.terminalId);
+                    setMode("environment");
+                  }
+                : undefined
+            }
             onHide={hide}
             busy={loading || creating}
             expanded={mode !== "shell"}
+            environmentOpen={mode === "environment"}
           />
         </div>
 
@@ -1170,6 +1185,7 @@ export function FloatingTerminal({
               busy={loading || creating}
               onCreate={createInContext}
               onManage={(id, nextMode) => {
+                managementReturnMode.current = "switch";
                 setManagedId(id);
                 setMode(nextMode);
               }}

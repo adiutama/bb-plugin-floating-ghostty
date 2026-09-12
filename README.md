@@ -54,7 +54,8 @@ application-menu commands remain controlled by BB/the operating system.
 Exited shells disappear automatically. The window selects another shell in the
 same project (or No project), or hides when that project has no shells left.
 
-Each project session’s **⋯** menu provides **Project environment…** alongside
+The variable button beside **×** opens the active project’s environment directly.
+Each project session’s **⋯** menu also provides **Project environment…** alongside
 **Rename…**, **Restart shell**, and **Delete terminal…**. The environment editor
 accepts strict dotenv assignments and applies them to new or restarted shells in
 every worktree owned by that project. Existing shells keep the environment they
@@ -115,7 +116,7 @@ native configuration file.
 | Move / resize      | Drag the header / an edge or corner                |
 | Maximize / restore | Session ⋯ menu, or double-click empty header space |
 | Rename             | Selector → session ⋯ → Rename…                     |
-| Project environment| Selector → project session ⋯ → Project environment…|
+| Project environment| Variable icon beside **×**, or selector → session ⋯  |
 | Delete a shell     | Selector → session ⋯ → Delete terminal…            |
 | Restart            | Selector → session ⋯ → Restart shell               |
 | Find               | Cmd/Ctrl+F inside the terminal                     |

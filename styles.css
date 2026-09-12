@@ -299,6 +299,10 @@
   border-radius: 6px;
   color: var(--muted-foreground);
 }
+.bb-fg-header-icon[data-active="true"] {
+  background: var(--state-active, var(--muted));
+  color: var(--foreground);
+}
 .bb-fg-terminal-body {
   background: var(--background);
   padding: 4px 12px 12px;
