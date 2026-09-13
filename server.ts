@@ -1,5 +1,6 @@
-import { readFile } from "node:fs/promises";
+import { chmod, readFile, unlink } from "node:fs/promises";
 import { createRequire } from "node:module";
+import { join } from "node:path";
 // bb-plugin-floating-ghostty — backend.
 //
 // Persistent terminal inventory in front of `bb.sdk.terminals`. Each record maps
@@ -113,6 +114,22 @@ export const rpcContract = defineRpcContract({
     output: z
       .object({ text: z.string(), revision: z.number().int().min(0) })
       .strict(),
+  },
+  listProjectEnvironments: {
+    input: z.null(),
+    output: z.object({
+      projects: z.array(
+        z
+          .object({
+            id: z.string(),
+            name: z.string(),
+            configured: z.boolean(),
+            keyCount: z.number().int().min(0),
+            updatedAt: z.string().nullable(),
+          })
+          .strict(),
+      ),
+    }),
   },
   saveProjectEnvironment: {
     input: z
@@ -338,6 +355,128 @@ export default async function plugin(bb: BbPluginApi) {
     { auth: "token" },
   );
 
+  const environmentDatabasePath = join(
+    bb.server.experimental_dataDir,
+    "plugins",
+    bb.pluginId,
+    "data.db",
+  );
+  async function secureEnvironmentDatabaseFiles() {
+    await Promise.all(
+      ["", "-wal", "-shm"].map(async (suffix) => {
+        try {
+          await chmod(`${environmentDatabasePath}${suffix}`, 0o600);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        }
+      }),
+    );
+  }
+
+  const environmentDatabase = bb.storage.database();
+  bb.storage.migrate(environmentDatabase, [
+    `CREATE TABLE IF NOT EXISTS project_environments (
+      project_id TEXT PRIMARY KEY,
+      text TEXT NOT NULL,
+      revision INTEGER NOT NULL,
+      updated_at TEXT NOT NULL
+    )`,
+    `CREATE TABLE IF NOT EXISTS floating_ghostty_migrations (
+      key TEXT PRIMARY KEY,
+      completed_at TEXT NOT NULL
+    )`,
+  ]);
+  await secureEnvironmentDatabaseFiles();
+
+  interface ProjectEnvironmentRow {
+    project_id: string;
+    text: string;
+    revision: number;
+    updated_at: string;
+  }
+
+  const environmentByProject = environmentDatabase.prepare(
+    `SELECT project_id, text, revision, updated_at
+     FROM project_environments WHERE project_id = ?`,
+  );
+  const allEnvironments = environmentDatabase.prepare(
+    `SELECT project_id, text, revision, updated_at FROM project_environments`,
+  );
+  const upsertEnvironment = environmentDatabase.prepare(
+    `INSERT INTO project_environments (project_id, text, revision, updated_at)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT(project_id) DO UPDATE SET
+       text = excluded.text,
+       revision = excluded.revision,
+       updated_at = excluded.updated_at`,
+  );
+
+  function getStoredEnvironment(projectId: string) {
+    const row = environmentByProject.get(projectId) as
+      | ProjectEnvironmentRow
+      | undefined;
+    return row
+      ? { text: row.text, revision: row.revision, updatedAt: row.updated_at }
+      : undefined;
+  }
+
+  function getStoredEnvironments() {
+    return Object.fromEntries(
+      (allEnvironments.all() as ProjectEnvironmentRow[]).map((row) => [
+        row.project_id,
+        { text: row.text, revision: row.revision, updatedAt: row.updated_at },
+      ]),
+    );
+  }
+
+  const legacyMigrationKey = "project-environment-vault-v1";
+  const legacyPath = join(
+    bb.server.experimental_dataDir,
+    "plugins",
+    bb.pluginId,
+    "secrets",
+    "projectEnvironmentVault",
+  );
+  const legacyMigrated = environmentDatabase
+    .prepare(`SELECT 1 FROM floating_ghostty_migrations WHERE key = ?`)
+    .get(legacyMigrationKey);
+  if (!legacyMigrated) {
+    let legacyValue: string | undefined;
+    try {
+      legacyValue = await readFile(legacyPath, "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    const migrate = environmentDatabase.transaction(() => {
+      if (legacyValue !== undefined) {
+        const legacy = parseProjectEnvironmentVault(legacyValue);
+        for (const [projectId, environment] of Object.entries(
+          legacy.projects,
+        )) {
+          upsertEnvironment.run(
+            projectId,
+            environment.text,
+            environment.revision,
+            environment.updatedAt,
+          );
+        }
+      }
+      environmentDatabase
+        .prepare(
+          `INSERT INTO floating_ghostty_migrations (key, completed_at)
+           VALUES (?, ?)`,
+        )
+        .run(legacyMigrationKey, new Date().toISOString());
+    });
+    migrate();
+    await secureEnvironmentDatabaseFiles();
+  }
+  try {
+    await unlink(legacyPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+
   const settings = bb.settings.define({
     // Keep the stored master key so existing opt-ins survive this UI change.
     overrideNativeShortcut: {
@@ -391,24 +530,6 @@ export default async function plugin(bb: BbPluginApi) {
       label: "Height (px)",
       default: 720,
       experimental_schema: z.number().int().min(240).max(2160),
-    },
-    projectEnvironmentVault: {
-      type: "string",
-      label: "Project environment vault",
-      description:
-        "Managed from a project terminal's actions menu. Do not edit this value directly.",
-      secret: true,
-      experimental_schema: z
-        .string()
-        .max(PROJECT_ENVIRONMENT_VAULT_MAX_BYTES)
-        .refine((value) => {
-          try {
-            parseProjectEnvironmentVault(value);
-            return true;
-          } catch {
-            return false;
-          }
-        }, "Project environment vault must contain valid Floating Ghostty data."),
     },
   });
   const host = bb.hosts.experimental_client({ contract: hostContract });
@@ -824,9 +945,7 @@ export default async function plugin(bb: BbPluginApi) {
     let environmentFile: string | null = null;
     const projectId = ownerOf(scope.key).projectId;
     if (projectId !== null) {
-      const values = await settings.get();
-      const stored = parseProjectEnvironmentVault(values.projectEnvironmentVault)
-        .projects[projectId];
+      const stored = getStoredEnvironment(projectId);
       if (stored !== undefined) {
         const entries = parseProjectEnvironment(stored.text);
         if (entries.length > 0) {
@@ -928,22 +1047,48 @@ export default async function plugin(bb: BbPluginApi) {
     },
 
     async getProjectEnvironment({ projectId }) {
-      const values = await settings.get();
-      const stored = parseProjectEnvironmentVault(values.projectEnvironmentVault)
-        .projects[projectId];
+      const stored = getStoredEnvironment(projectId);
       return stored === undefined
         ? { text: "", revision: 0 }
         : { text: stored.text, revision: stored.revision };
     },
 
+    async listProjectEnvironments() {
+      const projects = await withTimeout(
+        bb.sdk.projects.list({ includePersonal: true }),
+        SDK_TIMEOUT_MS,
+        "projects.list",
+      );
+      const stored = getStoredEnvironments();
+      return {
+        projects: projects
+          .map((project) => {
+            const environment = stored[project.id];
+            const keyCount = environment
+              ? parseProjectEnvironment(environment.text).length
+              : 0;
+            return {
+              id: project.id,
+              name: project.name,
+              configured: keyCount > 0,
+              keyCount,
+              updatedAt: environment?.updatedAt ?? null,
+            };
+          })
+          .filter((project) => project.configured)
+          .sort((left, right) =>
+            left.name.localeCompare(right.name, undefined, {
+              sensitivity: "base",
+            }),
+          ),
+      };
+    },
+
     async saveProjectEnvironment({ projectId, text, expectedRevision }) {
       const entries = parseProjectEnvironment(text);
       return serialize(async () => {
-        const values = await settings.get();
-        const vault = parseProjectEnvironmentVault(
-          values.projectEnvironmentVault,
-        );
-        const currentRevision = vault.projects[projectId]?.revision ?? 0;
+        const stored = getStoredEnvironments();
+        const currentRevision = stored[projectId]?.revision ?? 0;
         if (currentRevision !== expectedRevision) {
           throw new Error(
             "This project environment changed in another window. Reopen it and try again.",
@@ -952,21 +1097,26 @@ export default async function plugin(bb: BbPluginApi) {
         if (text === "" && currentRevision === 0) {
           return { revision: 0, keyCount: 0 };
         }
-        vault.projects[projectId] = {
+        stored[projectId] = {
           text,
           revision: currentRevision + 1,
           updatedAt: new Date().toISOString(),
         };
-        const serialized = JSON.stringify(vault);
+        const serialized = JSON.stringify({ version: 1, projects: stored });
         if (
           new TextEncoder().encode(serialized).byteLength >
           PROJECT_ENVIRONMENT_VAULT_MAX_BYTES
         ) {
           throw new Error("The project environment vault is full.");
         }
-        await settings.experimental_set({
-          projectEnvironmentVault: serialized,
-        });
+        const next = stored[projectId];
+        upsertEnvironment.run(
+          projectId,
+          next.text,
+          next.revision,
+          next.updatedAt,
+        );
+        await secureEnvironmentDatabaseFiles();
         return {
           revision: currentRevision + 1,
           keyCount: entries.length,

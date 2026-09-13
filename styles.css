@@ -353,6 +353,11 @@
   align-items: flex-start;
   justify-content: center;
 }
+.bb-fg-management-scrim {
+  position: fixed;
+  z-index: 70;
+  align-items: center;
+}
 .bb-fg-switcher {
   width: 100%;
   max-width: 576px;
@@ -596,6 +601,96 @@
 .bb-fg-management-error {
   padding: 0 16px 12px;
   color: var(--destructive);
+}
+
+/* Project-wide environment inventory on the plugin Settings page. */
+.bb-fg-project-environment-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.bb-fg-project-environment-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.bb-fg-project-environment-tools input {
+  max-width: 360px;
+}
+
+.bb-fg-project-environment-list {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.bb-fg-project-environment-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-height: 58px;
+  padding: 10px 12px;
+}
+
+.bb-fg-project-environment-row + .bb-fg-project-environment-row {
+  border-top: 1px solid var(--border);
+}
+
+.bb-fg-project-environment-copy {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.bb-fg-project-environment-name {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  color: var(--foreground);
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.bb-fg-project-environment-name > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bb-fg-project-environment-updated,
+.bb-fg-settings-status {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.bb-fg-settings-status,
+.bb-fg-settings-error {
+  display: flex;
+  min-height: 48px;
+  align-items: center;
+  gap: 8px;
+}
+
+.bb-fg-settings-error {
+  justify-content: space-between;
+  color: var(--destructive);
+  font-size: 13px;
+}
+
+@media (max-width: 520px) {
+  .bb-fg-project-environment-tools {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .bb-fg-project-environment-tools input {
+    max-width: none;
+  }
 }
 
 /* One quiet surface: the title belongs to the terminal, not a second toolbar. */

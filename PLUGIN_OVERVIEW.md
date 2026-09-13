@@ -20,7 +20,9 @@ selected project (the current BB context under All). Worktrees determine the
 launch directory; project ownership stays fixed. Each session’s **⋯** menu lets
 you rename, restart, or delete it. Project terminals also expose a dotenv editor
 whose values are injected into new and restarted shells across that project's
-worktrees. Names automatically follow the shell and
+worktrees. The plugin Settings page also provides a searchable inventory
+of configured projects and opens the same editor without requiring a running
+terminal. Names automatically follow the shell and
 running command unless you pin a custom name. Exited shells disappear automatically;
 the window selects another shell in the same project or closes if none remain.
 

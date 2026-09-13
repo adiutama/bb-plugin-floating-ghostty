@@ -4,6 +4,9 @@ import {
   experimental_scanPublicSdkOnly,
 } from "@get-bb/plugin-sdk/testing";
 import { fileURLToPath } from "node:url";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import plugin from "../server";
 
 const cleanups: (() => Promise<void>)[] = [];
@@ -12,16 +15,34 @@ afterEach(async () => {
   for (const cleanup of cleanups.splice(0)) await cleanup();
 });
 async function setup(settings: Record<string, boolean | string> = {}) {
+  const { projectEnvironmentVault, ...declaredSettings } = settings;
+  const dataDir = await mkdtemp(join(tmpdir(), "floating-ghostty-test-"));
   const host = createFakePluginHost({
     pluginId: "floating-ghostty",
-    settings,
+    dataDir,
+    settings: declaredSettings,
     experimental_callHostRpc: async ({ method }) => {
       if (method === "prepareProjectEnvironment")
         return { path: "/private/tmp/floating-ghostty/environment.sh" };
       throw new Error(`Unexpected host method ${method}`);
     },
   });
+  if (typeof projectEnvironmentVault === "string") {
+    const secretsDirectory = join(
+      host.bb.server.experimental_dataDir,
+      "plugins",
+      "floating-ghostty",
+      "secrets",
+    );
+    await mkdir(secretsDirectory, { recursive: true });
+    await writeFile(
+      join(secretsDirectory, "projectEnvironmentVault"),
+      projectEnvironmentVault,
+      { mode: 0o600 },
+    );
+  }
   cleanups.push(() => host.harness.lifecycle.dispose());
+  cleanups.push(() => rm(dataDir, { recursive: true, force: true }));
   const sessions = new Map<string, Record<string, unknown>>();
   let next = 0;
   host.harness.inspection.sdk.stub("hosts.list", async () => [
@@ -72,6 +93,12 @@ async function setup(settings: Record<string, boolean | string> = {}) {
 }
 
 describe("Floating Ghostty backend", () => {
+  it("keeps the raw project environment vault out of plugin settings", async () => {
+    const { harness } = await setup();
+    expect(harness.registrations.settingsDescriptors).not.toHaveProperty(
+      "projectEnvironmentVault",
+    );
+  });
   it("matches BB's native terminal font size", async () => {
     const { call } = await setup();
     expect(((await call("init", null)) as any).prefs.fontSize).toBe(12);
@@ -183,6 +210,64 @@ describe("Floating Ghostty backend", () => {
         projectId: "A",
       }),
     ).resolves.toEqual({ text: "", revision: 2 });
+  });
+  it("migrates the legacy secret vault into private plugin storage", async () => {
+    const legacyVault = JSON.stringify({
+      version: 1,
+      projects: {
+        A: {
+          text: "TOKEN=legacy",
+          revision: 4,
+          updatedAt: "2026-09-13T08:00:00.000Z",
+        },
+      },
+    });
+    const { call, harness } = await setup({
+      projectEnvironmentVault: legacyVault,
+    });
+
+    await expect(
+      call("getProjectEnvironment", { projectId: "A" }),
+    ).resolves.toEqual({ text: "TOKEN=legacy", revision: 4 });
+    await call("saveProjectEnvironment", {
+      projectId: "A",
+      text: "TOKEN=migrated",
+      expectedRevision: 4,
+    });
+
+    const reloaded = await harness.lifecycle.reload(plugin);
+    cleanups.push(() => reloaded.harness.lifecycle.dispose());
+    await expect(
+      reloaded.harness.behavior.callRpc("getProjectEnvironment", {
+        projectId: "A",
+      }),
+    ).resolves.toEqual({ text: "TOKEN=migrated", revision: 5 });
+  });
+  it("lists only projects with configured environments", async () => {
+    const { call, harness } = await setup();
+    harness.inspection.sdk.stub("projects.list", async () => [
+      { id: "B", name: "Beta" },
+      { id: "A", name: "Alpha" },
+    ]);
+    await call("saveProjectEnvironment", {
+      projectId: "B",
+      text: "TOKEN=secret\nREGION=local",
+      expectedRevision: 0,
+    });
+
+    await expect(call("listProjectEnvironments", null)).resolves.toMatchObject({
+      projects: [
+        {
+          id: "B",
+          name: "Beta",
+          configured: true,
+          keyCount: 2,
+        },
+      ],
+    });
+    expect(harness.inspection.sdk.callsTo("projects.list").at(-1)?.[0]).toEqual({
+      includePersonal: true,
+    });
   });
   it("prepares project values on the target host without putting them in terminal metadata", async () => {
     const { call, harness } = await setup();

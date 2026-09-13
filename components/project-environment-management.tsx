@@ -82,7 +82,7 @@ export function ProjectEnvironmentManagement({
 
   return (
     <div
-      className="bb-fg-switcher-scrim"
+      className="bb-fg-switcher-scrim bb-fg-management-scrim"
       onPointerDown={() => {
         if (!busy) onDismiss();
       }}

@@ -59,7 +59,9 @@ Each project session’s **⋯** menu also provides **Project environment…** a
 **Rename…**, **Restart shell**, and **Delete terminal…**. The environment editor
 accepts strict dotenv assignments and applies them to new or restarted shells in
 every worktree owned by that project. Existing shells keep the environment they
-started with. Managing another session leaves your current shell selected.
+started with. The plugin Settings page lists configured project environments
+and lets you search, inspect, and edit each one.
+Managing another session leaves your current shell selected.
 Closing a management dialog returns to the selector with its search and filter
 preserved. Deletion asks for
 confirmation and stops the shell and its running commands. A connection failure
@@ -186,6 +188,8 @@ window was unavailable during this implementation.
 - `components/terminal-switcher.tsx` owns the flat list and filters.
 - `components/terminal-management.tsx` owns naming and deletion dialogs.
 - `components/project-environment-management.tsx` owns the project dotenv editor.
+- `components/project-environment-settings.tsx` provides the searchable project
+  environment inventory on the plugin Settings page.
 - `lib/shell-integration.ts` installs session-local shell title hooks; `lib/terminal-title.ts`
   reads bounded OSC title signals because the pinned Ghostty adapter lacks title reporting.
 - `lib/pump.ts` connects one Ghostty renderer to one BB PTY. Hidden tabs stop
@@ -194,7 +198,8 @@ window was unavailable during this implementation.
   without mounting renderers or sending terminal replies.
 - `lib/ghostty.ts` loads the authenticated WASM and adapts Wterm's Ghostty guards.
 - `server.ts` uses public `bb.sdk.terminals` APIs, plugin-owned KV storage, and a
-  BB-protected secret setting for the versioned project environment vault.
+  private plugin database for project environments. Existing secret-setting vaults
+  are imported once during migration and are no longer exposed in Settings.
   Every terminal operation checks ownership.
 - `host.ts` writes a private one-use export file on the shell's machine. The
   shell sources and deletes it during startup; secret values never enter terminal
