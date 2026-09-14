@@ -49,10 +49,11 @@ export class TerminalPump {
   private interval = FAST_INTERVAL;
   private pollTimer: number | null = null;
   private reading = false;
+  private echoPending = false;
   private flushTimer: number | null = null;
   private resizeTimer: number | null = null;
   private outbox: string[] = [];
-  private writeChain: Promise<unknown> = Promise.resolve();
+  private writing = false;
   private status: TabStatus = "connecting";
   private visible = false;
   private wantsFocus = true;
@@ -64,6 +65,7 @@ export class TerminalPump {
   private fontSize: number;
   private resizeObserver: ResizeObserver;
   private fitFrame: number | null = null;
+  private fitting = false;
   private searchQuery = "";
   private searchIndex = -1;
   private abort = new AbortController();
@@ -140,6 +142,8 @@ export class TerminalPump {
       this.core = core;
       const terminal = new WTerm(this.options.container, {
         core,
+        // Keep Wterm's cell-metric updates for selection and scrolling.
+        // Its competing grid resize is gated below; the pump owns sizing.
         autoResize: true,
         cursorBlink: true,
         onData: (data) => {
@@ -151,7 +155,7 @@ export class TerminalPump {
       // while hidden; a collapsed window must never reflow the shell.
       const resize = terminal.resize.bind(terminal);
       terminal.resize = (cols, rows) => {
-        if (this.disposed || !this.visible || cols < 2 || rows < 2) return;
+        if (!this.fitting || this.disposed || !this.visible || cols < 2 || rows < 2) return;
         if (cols === terminal.cols && rows === terminal.rows) return;
         resize(cols, rows);
       };
@@ -363,32 +367,43 @@ export class TerminalPump {
   }
 
   private flushInput(): void {
-    const pending = this.outbox.join("");
-    this.outbox = [];
-    if (pending === "" || this.disposed) return;
+    if (this.writing || this.disposed || this.outbox.length === 0) return;
+    void this.drainInput();
+  }
 
-    // Chained so keystrokes reach the pty in the order they were typed, and
-    // chunked so a paste over the transport ceiling is split instead of refused.
-    for (const dataBase64 of encodeInputChunks(pending)) {
-      this.writeChain = this.writeChain
-        .then(() =>
-          this.disposed
-            ? undefined
-            : this.options.rpc.call("write", {
-                terminalId: this.options.terminalId,
-                dataBase64,
-              }),
-        )
-        .catch((error: unknown) => {
-          this.setStatus(
-            "error",
-            error instanceof Error ? error.message : "Write failed",
-          );
-        });
+  private async drainInput(): Promise<void> {
+    this.writing = true;
+    try {
+      while (!this.disposed && this.outbox.length > 0) {
+        // Accumulate keystrokes during a slow request instead of reserving a
+        // separate round trip for each 4ms input batch. One writer preserves
+        // byte order, including across transport-sized paste chunks.
+        const pending = this.outbox.join("");
+        this.outbox = [];
+        for (const dataBase64 of encodeInputChunks(pending)) {
+          if (this.disposed) return;
+          try {
+            await this.options.rpc.call("write", {
+              terminalId: this.options.terminalId,
+              dataBase64,
+            });
+            // Ask for echo as soon as the host accepts input. An existing
+            // read still owns its completion and prevents overlapping reads.
+            this.interval = FAST_INTERVAL;
+            this.echoPending = true;
+            this.schedule(0);
+          } catch (error) {
+            if (!this.disposed)
+              this.setStatus(
+                "error",
+                error instanceof Error ? error.message : "Write failed",
+              );
+          }
+        }
+      }
+    } finally {
+      this.writing = false;
     }
-    // Any keystroke pulls polling back to its fastest.
-    this.interval = FAST_INTERVAL;
-    if (this.pollTimer !== null) this.schedule(FAST_INTERVAL);
   }
 
   private scheduleResize(cols: number, rows: number): void {
@@ -432,6 +447,7 @@ export class TerminalPump {
       return;
     }
     this.reading = true;
+    this.echoPending = false;
     let next: "schedule" | "replay" | "stop" = "schedule";
 
     try {
@@ -482,7 +498,8 @@ export class TerminalPump {
     }
 
     if (next === "replay") await this.replay();
-    else if (next === "schedule") this.schedule(this.interval);
+    else if (next === "schedule")
+      this.schedule(this.echoPending ? 0 : this.interval);
   }
 
   private reportExit(status: string, exitCode: number | null): void {
@@ -580,7 +597,12 @@ export class TerminalPump {
       2,
       Math.floor(el.clientHeight / Math.ceil(this.fontSize * 1.2)),
     );
-    this.terminal.resize(cols, rows);
+    this.fitting = true;
+    try {
+      this.terminal.resize(cols, rows);
+    } finally {
+      this.fitting = false;
+    }
   }
   setFocused(focused: boolean): void {
     this.wantsFocus = focused;
@@ -620,6 +642,7 @@ export class TerminalPump {
   }
   dispose(): void {
     this.disposed = true;
+    this.outbox = [];
     this.abort.abort();
     this.stopPolling();
     this.resizeObserver.disconnect();

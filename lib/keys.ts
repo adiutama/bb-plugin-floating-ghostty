@@ -8,7 +8,7 @@ export type ToolbarKeyKind = "send" | "modifier" | "arrow" | "action";
 
 export interface ToolbarKey {
   id: string;
-  /** What the button shows. Short, because the bar scrolls. */
+  /** Short label for the shortcut tray. */
   label: string;
   /** Spoken label, when the glyph alone would not say it. */
   title: string;
@@ -55,10 +55,7 @@ export function arrowSequence(
   return `\x1b${applicationCursorKeys ? "O" : "["}${ARROW_FINAL[direction]}`;
 }
 
-/**
- * Ordered by how often a thumb reaches for it, because the bar scrolls and only
- * the first handful are visible without a swipe.
- */
+/** Available terminal shortcuts. The toolbar chooses its quick actions and groups by id. */
 export const TOOLBAR_KEYS: readonly ToolbarKey[] = [
   { id: "esc", label: "esc", title: "Escape", kind: "send", send: "\x1b", emphasis: true },
   { id: "tab", label: "tab", title: "Tab", kind: "send", send: "\t", emphasis: true },
@@ -67,6 +64,7 @@ export const TOOLBAR_KEYS: readonly ToolbarKey[] = [
   { id: "up", label: "↑", title: "Up", kind: "arrow", direction: "up" },
   { id: "down", label: "↓", title: "Down", kind: "arrow", direction: "down" },
   { id: "right", label: "→", title: "Right", kind: "arrow", direction: "right" },
+  { id: "shift-tab", label: "⇧ Tab", title: "Shift+Tab", kind: "send", send: "\x1b[Z" },
   { id: "ctrl-c", label: "^C", title: "Interrupt (Ctrl+C)", kind: "send", send: "\x03", emphasis: true },
   { id: "ctrl-d", label: "^D", title: "End of file (Ctrl+D)", kind: "send", send: "\x04" },
   { id: "ctrl-z", label: "^Z", title: "Suspend (Ctrl+Z)", kind: "send", send: "\x1a" },

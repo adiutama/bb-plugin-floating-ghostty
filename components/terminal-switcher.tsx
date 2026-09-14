@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Command, CommandInput, CommandItem, CommandList } from "./ui/command";
 import { defaultFilter, useCommandState } from "cmdk";
 import { containTab, isolateTerminalKey } from "../lib/keyboard";
+import { usePointerCoarse } from "./ui/hooks/use-pointer-coarse";
 import { ProjectFilter } from "./project-filter";
 import type { ManagementMode } from "./terminal-management";
 import {
@@ -51,6 +52,8 @@ export function TerminalSwitcher({
   onFind?: () => void;
   maximize: { on: boolean; toggle: () => void } | null;
 }) {
+  const touch = usePointerCoarse();
+  const panel = useRef<HTMLElement>(null);
   const [filter, setFilter] = useState(() => contextKey(context));
   const [filterOpen, setFilterOpen] = useState(false);
   const projects = new Map(
@@ -95,9 +98,12 @@ export function TerminalSwitcher({
   };
   useEffect(() => {
     if (!visible) return;
-    const frame = requestAnimationFrame(() => input.current?.focus());
+    const frame = requestAnimationFrame(() => {
+      if (touch) panel.current?.focus({ preventScroll: true });
+      else input.current?.focus();
+    });
     return () => cancelAnimationFrame(frame);
-  }, [visible]);
+  }, [visible, touch]);
   const shown = tabs
     .filter(
       (tab) =>
@@ -125,7 +131,6 @@ export function TerminalSwitcher({
     );
   useEffect(() => {
     const ids = shown.map(({ tab }) => tab.terminalId);
-    if (!query.trim() && !busy) ids.push("new-terminal");
     if (!ids.includes(highlighted)) setHighlighted(ids[0] ?? "");
   }, [shown, highlighted, query, busy]);
   return (
@@ -137,6 +142,8 @@ export function TerminalSwitcher({
     >
       <section
         className="bb-fg-switcher bb-fg-thread-search"
+        ref={panel}
+        tabIndex={-1}
         role="dialog"
         aria-label="Switch terminal"
         onPointerDown={(event) => event.stopPropagation()}
@@ -166,6 +173,12 @@ export function TerminalSwitcher({
           }
         }}
       >
+        <div className="bb-fg-picker-heading">
+          <div><strong>Terminals</strong></div>
+          <button type="button" className="bb-fg-picker-back" onClick={onDismiss} aria-label="Back to terminal">
+            <Icon name="X" className="size-4" />
+          </button>
+        </div>
         <Command
           label="Search terminals"
           shouldFilter={false}
@@ -182,16 +195,26 @@ export function TerminalSwitcher({
               placeholder="Search terminals"
             />
             <ProjectFilter
+              focusSearch={!touch}
               open={filterOpen}
               onOpenChange={setFilterOpen}
               value={filter}
               options={filters}
               onChange={setFilter}
               onClose={() => {
-                if (input.current?.closest("[hidden], [inert]") == null)
-                  input.current?.focus();
+                if (input.current?.closest("[hidden], [inert]") == null) {
+                  if (touch) panel.current?.focus({ preventScroll: true });
+                  else input.current?.focus();
+                }
               }}
             />
+            {touch ? (
+              <button type="button" className="bb-fg-picker-keyboard-dismiss"
+                aria-label="Hide search keyboard"
+                onClick={() => panel.current?.focus({ preventScroll: true })}>
+                <Icon name="ChevronDown" className="size-4" />
+              </button>
+            ) : null}
           </div>
           <div className="bb-fg-search-context">
             <span>
@@ -222,23 +245,14 @@ export function TerminalSwitcher({
                 maximize={maximize}
               />
             ))}
-            {!query.trim() ? (
-              <CommandItem
-                value="new-terminal"
-                aria-label="New terminal"
-                className="bb-fg-new-terminal"
-                disabled={busy}
-                onSelect={() => {
-                  if (!busy) onCreate(creationProject);
-                }}
-              >
-                <Icon name="Plus" className="size-4" />
-                <span>{busy ? "Starting…" : "New terminal"}</span>
-                <small title={creationLabel}>{creationLabel}</small>
-              </CommandItem>
-            ) : null}
           </CommandList>
         </Command>
+        <div className="bb-fg-picker-footer">
+          <button type="button" className="bb-fg-create-session" title={`New terminal in ${creationLabel}`} disabled={busy} onClick={() => onCreate(creationProject)}>
+            <Icon name="Plus" className="size-4" />
+            <span>{busy ? "Starting…" : "New terminal"}</span>
+          </button>
+        </div>
       </section>
     </div>
   );
@@ -279,7 +293,7 @@ function SessionRow({
     if (!visible) setMenuOpen(false);
   }, [visible]);
   return (
-    <div className="bb-fg-session-row" data-highlighted={highlighted}>
+    <div className="bb-fg-session-row" data-highlighted={highlighted} data-current={active}>
       <CommandItem
         aria-label={`${tabName(tab)} · ${tab.cwd || "Directory unavailable"} · ${owner} · ${tab.hostName}${active ? " · Current terminal" : ""}${tab.status === "exited" ? " · Exited" : tab.status === "error" ? " · Error" : ""}`}
         value={tab.terminalId}
@@ -292,12 +306,18 @@ function SessionRow({
         ]}
         onSelect={() => onSelect(tab.terminalId)}
       >
+        <span className="bb-fg-session-avatar" aria-hidden="true">
+          <Icon name={active ? "Check" : "Terminal"} className="size-4" />
+        </span>
         <span className="bb-fg-session-copy">
           <span className="bb-fg-session-name">
             <SearchTitle title={tabName(tab)} query={query} />
           </span>
+          <span className="bb-fg-session-scope" title={`${owner} · ${tab.hostName}`}>
+            <span>{owner} · {tab.hostName}</span>
+          </span>
           <span
-            className="bb-fg-session-scope"
+            className="bb-fg-session-scope bb-fg-session-directory"
             title={tab.cwd || "Directory unavailable"}
           >
             <Icon name="Folder" className="size-3.5 shrink-0" />
@@ -311,7 +331,7 @@ function SessionRow({
           className="bb-fg-session-current"
           aria-label={active ? "Current terminal" : undefined}
         >
-          {active ? <Icon name="Check" className="size-4" /> : null}
+          {active ? <span className="bb-fg-current-dot" /> : null}
         </span>
       </CommandItem>
       <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>

@@ -463,3 +463,109 @@ it("inherits live host colors for the terminal and existing history", async () =
   );
   expect(container.querySelector(".term-row")?.textContent).toContain("Boo");
 });
+
+it("coalesces typing behind a slow write instead of adding one round trip per key", async () => {
+  const releases: Array<() => void> = [];
+  const call = vi.fn(async (method: string, input: Record<string, unknown>) => {
+    if (method === "read") return output(input.replay ? "ready" : "");
+    if (method === "write") await new Promise<void>((resolve) => releases.push(resolve));
+    return { ok: true };
+  });
+  const { pump, container } = createPump(call);
+  await vi.waitFor(() => expect(container.textContent).toContain("ready"));
+  const writes = () => call.mock.calls.filter(([method]) => method === "write");
+  try {
+    pump.send("a");
+    await vi.waitFor(() => expect(writes()).toHaveLength(1));
+    for (const key of ["b", "c", "d"]) {
+      pump.send(key);
+      await new Promise((resolve) => setTimeout(resolve, 12));
+    }
+    expect(writes()).toHaveLength(1);
+    releases.shift()!();
+    await vi.waitFor(() => expect(writes()).toHaveLength(2));
+    expect(atob(String(writes()[1][1].dataBase64))).toBe("bcd");
+  } finally {
+    pump.dispose();
+    for (const release of releases) release();
+  }
+});
+
+it("keeps queued input after every bounded chunk of an in-flight large paste", async () => {
+  const releases: Array<() => void> = [];
+  const call = vi.fn(async (method: string, input: Record<string, unknown>) => {
+    if (method === "read") return output(input.replay ? "ready" : "");
+    if (method === "write") await new Promise<void>((resolve) => releases.push(resolve));
+    return { ok: true };
+  });
+  const { pump, container } = createPump(call);
+  await vi.waitFor(() => expect(container.textContent).toContain("ready"));
+  const writes = () => call.mock.calls.filter(([method]) => method === "write");
+  const text = "x".repeat(65536 + 10);
+  try {
+    pump.send(text);
+    await vi.waitFor(() => expect(writes()).toHaveLength(1));
+    pump.send("tail");
+    releases.shift()!();
+    await vi.waitFor(() => expect(writes()).toHaveLength(2));
+    releases.shift()!();
+    await vi.waitFor(() => expect(writes()).toHaveLength(3));
+    const chunks = writes().map(([, input]) => atob(String(input.dataBase64)));
+    expect(chunks.every((chunk) => chunk.length <= 65536)).toBe(true);
+    expect(chunks.join("")).toBe(text + "tail");
+  } finally {
+    pump.dispose();
+    for (const release of releases) release();
+  }
+});
+
+it("uses a single grid calculation when the viewport changes", async () => {
+  const observers: Array<{ callback: ResizeObserverCallback; target?: Element }> = [];
+  vi.stubGlobal("ResizeObserver", class {
+    entry: typeof observers[number];
+    constructor(callback: ResizeObserverCallback) { this.entry = { callback }; observers.push(this.entry); }
+    observe(target: Element) { this.entry.target = target; }
+    disconnect() {}
+  });
+  const { WTerm } = await import("@wterm/dom");
+  const resize = vi.spyOn(WTerm.prototype, "resize");
+  const { pump, container } = createPump();
+  await vi.waitFor(() => expect(container.textContent).toContain("Boo"));
+  resize.mockClear();
+  // The inner viewport can change before the outer box settles (e.g.
+  // keyboard animation). Only the outer box should determine the grid.
+  for (const observer of observers) {
+    observer.callback([{ target: observer.target, contentRect: { width: 640, height: 312 } } as ResizeObserverEntry], {} as ResizeObserver);
+  }
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  expect(resize.mock.calls.filter(([cols, rows]) => cols !== 80 || rows !== 24)).toEqual([]);
+  expect(pump.rows()).toBe(24);
+});
+
+it("reads fresh echo immediately after a pre-input read finishes", async () => {
+  let release!: () => void;
+  let reads = 0;
+  const pending = new Promise<void>((resolve) => { release = resolve; });
+  const call = vi.fn(async (method: string, input: Record<string, unknown>) => {
+    if (method !== "read") return { ok: true };
+    if (input.replay) return output("ready");
+    if (++reads === 1) await pending;
+    return output("");
+  });
+  const { pump, container } = createPump(call);
+  await vi.waitFor(() => expect(container.textContent).toContain("ready"));
+  await vi.waitFor(() => expect(reads).toBe(1));
+  vi.useFakeTimers();
+  try {
+    pump.send("a");
+    await vi.advanceTimersByTimeAsync(4);
+    expect(reads).toBe(1); // Never overlap an existing read.
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(reads).toBe(2); // No polling backoff after that obsolete response.
+  } finally {
+    release();
+    pump.dispose();
+    vi.useRealTimers();
+  }
+});

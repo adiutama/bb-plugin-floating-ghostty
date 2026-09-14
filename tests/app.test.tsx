@@ -23,8 +23,13 @@ vi.mock("../components/terminal-view", async () => {
         const shell = ref.current;
         const exit = () =>
           onStatus(terminalId, "exited", "Shell exited with code 0");
+        const ready = () => onStatus(terminalId, "live", null);
         shell?.addEventListener("shell-exit", exit);
-        return () => shell?.removeEventListener("shell-exit", exit);
+        shell?.addEventListener("shell-ready", ready);
+        return () => {
+          shell?.removeEventListener("shell-exit", exit);
+          shell?.removeEventListener("shell-ready", ready);
+        };
       }, [terminalId, onStatus]);
       React.useEffect(() => {
         onPumpReady(terminalId, {
@@ -145,6 +150,9 @@ async function setup(
   options: {
     override?: boolean;
     pending?: Promise<void>;
+    pendingRead?: Promise<void>;
+    pendingContext?: Promise<void>;
+    pendingSelection?: Promise<void>;
     settings?: Record<string, unknown>;
     projectless?: boolean;
   } = {},
@@ -187,7 +195,8 @@ async function setup(
         ...options.settings,
       },
       rpc: {
-        resolveContext: (input: unknown) => {
+        resolveContext: async (input: unknown) => {
+          await options.pendingContext;
           const route = input as { projectId: string | null };
           return route.projectId === "A"
             ? { context, scopes }
@@ -245,8 +254,13 @@ async function setup(
           revision++;
           return { snapshot: snapshot(), restarted };
         },
-        setActiveTab: () => ({ ok: true }),
-        read: (input: unknown) => ({
+        setActiveTab: async () => {
+          await options.pendingSelection;
+          return { ok: true };
+        },
+        read: async (input: unknown) => {
+          await options.pendingRead;
+          return ({
           chunks: [],
           nextSeq: 0,
           truncated: false,
@@ -254,7 +268,8 @@ async function setup(
             ? "exited"
             : "running",
           exitCode: null,
-        }),
+        });
+        },
         terminalShortcuts: () => [
           {
             key: "Enter",
@@ -406,7 +421,7 @@ it("defaults projectless conversations to No project and keeps project shells ou
     expect(slot.queryByRole("option", { name: /project-shell/ })).toBeNull();
     expect(slot.getByRole("option", { name: /home-shell/ })).not.toBeNull();
     expect(
-      slot.getByRole("option", { name: "New terminal" }).textContent,
+      slot.getByRole("button", { name: "New terminal" }).getAttribute("title"),
     ).toContain("No project");
   } finally {
     slot.lifecycle.unmount();
@@ -431,7 +446,7 @@ it("defaults to the thread project, opens project filters with Cmd+P, and switch
     ).not.toBeNull();
     expect(slot.queryByRole("option", { name: /foreign/ })).toBeNull();
     expect(slot.queryByRole("option", { name: /global/ })).toBeNull();
-    expect(slot.getAllByRole("option")).toHaveLength(3); // Two shells and New.
+    expect(slot.getAllByRole("option")).toHaveLength(2); // Creation is a separate, always-visible action.
     const hostKey = vi.fn();
     document.addEventListener("keydown", hostKey);
     try {
@@ -469,7 +484,7 @@ it("defaults to the thread project, opens project filters with Cmd+P, and switch
       ),
     );
     await waitFor(() => expect(document.activeElement).toBe(search));
-    expect(slot.getAllByRole("option")).toHaveLength(5);
+    expect(slot.getAllByRole("option")).toHaveLength(4);
     fireEvent.click(slot.getByRole("option", { name: /foreign/ }));
     const foreign = slot.getByRole("textbox", { name: "Shell foreign" });
     await waitFor(() => expect(document.activeElement).toBe(foreign));
@@ -683,7 +698,7 @@ it("creates immediately in the current context even while viewing a sibling shel
     await act(async () => switcher());
     fireEvent.click(slot.getByRole("option", { name: /sibling/ }));
     await act(async () => switcher());
-    fireEvent.click(slot.getByRole("option", { name: "New terminal" }));
+    fireEvent.click(slot.getByRole("button", { name: "New terminal" }));
     expect(slot.queryByRole("dialog", { name: "New terminal" })).toBeNull();
     const shell = await slot.findByRole("textbox", { name: "Shell created-1" });
     await waitFor(() => expect(document.activeElement).toBe(shell));
@@ -733,13 +748,10 @@ it("creates in the selected project and offers no ownership transfer", async () 
       ),
     );
     await waitFor(() => expect(document.activeElement).toBe(search));
-    const create = slot.getByRole("option", { name: "New terminal" });
-    expect(create.textContent).toContain("Project B");
-    // An empty project's creation row is selected and can be activated with Enter.
-    await waitFor(() =>
-      expect(create.getAttribute("aria-selected")).toBe("true"),
-    );
-    await act(async () => fireEvent.keyDown(search, { key: "Enter" }));
+    const create = slot.getByRole("button", { name: "New terminal" });
+    expect(create.getAttribute("title")).toContain("Project B");
+    // Creation stays outside the results and uses the selected project.
+    await act(async () => fireEvent.click(create));
     await slot.findByRole("textbox", { name: "Shell created-1" });
     expect(
       slot.inspection.rpcCalls
@@ -854,7 +866,7 @@ it("renames from the actions menu and explicitly deletes the last shell without 
       fireEvent.click(slot.getByRole("button", { name: "Save" }));
     });
     expect(
-      slot.container.querySelector(".bb-fg-session-trigger")?.textContent,
+      slot.container.querySelector(".bb-fg-header-name")?.textContent,
     ).toBe("Dev server");
     await act(async () => {
       fireEvent.keyDown(actions, { key: "Enter" });
@@ -979,7 +991,7 @@ it("manages a filtered inactive terminal without changing shells and preserves t
     const action = slot.getByRole("button", { name: "Actions for sibling" });
     await act(async () => fireEvent.keyDown(action, { key: "Enter" }));
     expect(
-      slot.container.querySelector(".bb-fg-session-trigger")?.textContent,
+      slot.container.querySelector(".bb-fg-header-name")?.textContent,
     ).toBe("current");
     await act(async () =>
       fireEvent.keyDown(document.querySelector('[role="menu"]')!, {
@@ -1011,7 +1023,7 @@ it("manages a filtered inactive terminal without changing shells and preserves t
     expect((search as HTMLInputElement).value).toBe("sib");
     expect(slot.getByRole("option", { name: /Sibling build/ })).not.toBeNull();
     expect(
-      slot.container.querySelector(".bb-fg-session-trigger")?.textContent,
+      slot.container.querySelector(".bb-fg-header-name")?.textContent,
     ).toBe("current");
     expect(
       slot.inspection.rpcCalls
@@ -1030,7 +1042,7 @@ it("manages a filtered inactive terminal without changing shells and preserves t
       ),
     );
     expect(
-      slot.container.querySelector(".bb-fg-session-trigger")?.textContent,
+      slot.container.querySelector(".bb-fg-header-name")?.textContent,
     ).toBe("current");
     expect(
       slot.inspection.rpcCalls
@@ -1118,17 +1130,17 @@ it("uses thread-search rows and treats a leading > as terminal search text", asy
       slot.queryByRole("button", { name: "Terminal mode actions" }),
     ).toBeNull();
     expect(slot.container.querySelector(".bb-fg-palette-footer")).toBeNull();
-    const create = slot.getByRole("option", { name: "New terminal" });
-    expect(create.closest("[cmdk-list]")).not.toBeNull();
+    const create = slot.getByRole("button", { name: "New terminal" });
+    expect(create.closest("[cmdk-list]")).toBeNull();
     fireEvent.change(search, { target: { value: ">find" } });
-    expect(slot.queryByRole("option", { name: "New terminal" })).toBeNull();
+    expect(slot.queryByRole("button", { name: "New terminal" })).not.toBeNull();
     expect(slot.queryByRole("combobox", { name: "Search actions" })).toBeNull();
     expect(slot.getByRole("option", { name: />find output/ })).not.toBeNull();
     expect(slot.container.querySelector("mark")?.textContent).toBe(">find");
     fireEvent.change(search, { target: { value: "no-such-shell" } });
-    expect(slot.queryByRole("option", { name: "New terminal" })).toBeNull();
+    expect(slot.queryByRole("button", { name: "New terminal" })).not.toBeNull();
     fireEvent.change(search, { target: { value: "" } });
-    expect(slot.getByRole("option", { name: "New terminal" })).not.toBeNull();
+    expect(slot.getByRole("button", { name: "New terminal" })).not.toBeNull();
     fireEvent.keyDown(search, { key: "Escape" });
     await waitFor(() => expect(document.activeElement).toBe(shell));
   } finally {
@@ -1174,3 +1186,99 @@ it("keeps window and find controls in session menus without changing search mode
     slot.lifecycle.unmount();
   }
 }, 60000);
+
+
+it("locks a landscape phone fullscreen and opens the picker without raising the keyboard", async () => {
+  vi.stubGlobal("innerWidth", 844);
+  vi.stubGlobal("innerHeight", 390);
+  vi.stubGlobal("matchMedia", (query: string) => ({
+    matches: query.includes("pointer: coarse"),
+    addEventListener() {},
+    removeEventListener() {},
+  }));
+  const slot = await setup([tab("current", "project:A")], {
+    settings: { customWindowSize: true, windowWidth: 360, windowHeight: 240 },
+  });
+  try {
+    await act(async () => toggle());
+    await slot.findByRole("textbox", { name: "Shell current" });
+    const overlay = slot.container.querySelector<HTMLElement>(".bb-fg-window")!;
+    expect(overlay.dataset.layout).toBe("sheet");
+    await act(async () => fireEvent.doubleClick(overlay.querySelector("[data-bb-fg-handle]")!));
+    expect(overlay.dataset.layout).toBe("sheet");
+    expect(overlay.style.width).toBe("");
+    await act(async () => switcher());
+    const picker = slot.getByRole("dialog", { name: "Switch terminal" });
+    await waitFor(() => expect(document.activeElement).toBe(picker));
+    slot.getByRole("combobox", { name: "Search terminals" }).focus();
+    fireEvent.click(slot.getByRole("button", { name: "Hide search keyboard" }));
+    expect(document.activeElement).toBe(picker);
+    expect(slot.getByRole("button", { name: "New terminal" })).not.toBeNull();
+    expect(slot.queryByText("Restore size")).toBeNull();
+  } finally {
+    slot.lifecycle.unmount();
+  }
+});
+
+
+it("opens the selector and switches sessions while background network requests remain pending", async () => {
+  let release!: () => void;
+  const pending = new Promise<void>((resolve) => { release = resolve; });
+  const slot = await setup([tab("first", "project:A"), tab("second", "project:A")], {
+    pendingRead: pending,
+    pendingSelection: pending,
+  });
+  try {
+    await act(async () => toggle());
+    await slot.findByRole("textbox", { name: "Shell first" });
+    await act(async () => switcher());
+    expect(slot.getByRole("dialog", { name: "Switch terminal" })).not.toBeNull();
+    expect(slot.inspection.rpcCalls.some((call) => call.method === "read")).toBe(true);
+    fireEvent.click(slot.getByRole("option", { name: /^second/ }));
+    const second = await slot.findByRole("textbox", { name: "Shell second" });
+    await waitFor(() => expect(document.activeElement).toBe(second));
+    expect(slot.queryByRole("dialog", { name: "Switch terminal" })).toBeNull();
+    expect(slot.inspection.rpcCalls.some((call) => call.method === "setActiveTab")).toBe(true);
+  } finally {
+    release();
+    slot.lifecycle.unmount();
+  }
+});
+
+
+it("loads the terminal snapshot while context resolution is still pending", async () => {
+  let release!: () => void;
+  const pending = new Promise<void>((resolve) => { release = resolve; });
+  const slot = await setup([tab("current", "project:A")], { pendingContext: pending });
+  try {
+    await act(async () => toggle());
+    expect(slot.inspection.rpcCalls.some((call) => call.method === "init")).toBe(true);
+    release();
+    await slot.findByRole("textbox", { name: "Shell current" });
+  } finally {
+    release();
+    slot.lifecycle.unmount();
+  }
+});
+
+
+it("keeps the loading indicator until the terminal confirms its first output is loaded", async () => {
+  let release!: () => void;
+  const pending = new Promise<void>((resolve) => { release = resolve; });
+  const slot = await setup([tab("current", "project:A")], { pendingContext: pending });
+  try {
+    await act(async () => toggle());
+    expect(slot.getByRole("status").textContent).toContain("Opening terminal");
+    const body = slot.container.querySelector(".bb-fg-terminal-body")!;
+    expect(body.getAttribute("aria-busy")).toBe("true");
+    await act(async () => release());
+    const shell = await slot.findByRole("textbox", { name: "Shell current" });
+    expect(slot.getByRole("status").textContent).toContain("Loading terminal");
+    await act(async () => shell.dispatchEvent(new Event("shell-ready")));
+    expect(slot.queryByRole("status")).toBeNull();
+    expect(body.getAttribute("aria-busy")).toBe("false");
+  } finally {
+    release();
+    slot.lifecycle.unmount();
+  }
+});

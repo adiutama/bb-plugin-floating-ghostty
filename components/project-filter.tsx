@@ -1,3 +1,4 @@
+import { useRef } from "react";
 import * as Popover from "@radix-ui/react-popover";
 import {
   Command,
@@ -17,6 +18,7 @@ export function ProjectFilter({
   options,
   onChange,
   onClose,
+  focusSearch = true,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -24,7 +26,9 @@ export function ProjectFilter({
   options: { key: string; label: string }[];
   onChange: (value: string) => void;
   onClose: () => void;
+  focusSearch?: boolean;
 }) {
+  const panel = useRef<HTMLDivElement>(null);
   const label =
     options.find((option) => option.key === value)?.label ??
     "Project unavailable";
@@ -49,6 +53,14 @@ export function ProjectFilter({
       <Popover.Portal>
         <Popover.Content
           {...scope}
+          ref={panel}
+          tabIndex={-1}
+          onOpenAutoFocus={(event) => {
+            if (!focusSearch) {
+              event.preventDefault();
+              panel.current?.focus({ preventScroll: true });
+            }
+          }}
           className="bb-fg-project-menu"
           align="end"
           sideOffset={6}
@@ -63,7 +75,7 @@ export function ProjectFilter({
         >
           <Command label="Search projects" loop defaultValue={value}>
             <CommandInput
-              autoFocus
+              autoFocus={focusSearch}
               aria-label="Search projects"
               placeholder="Search projects…"
             />

@@ -5,7 +5,7 @@ terminal window with Ghostty's terminal engine through Wterm.
 
 Open the ghost button in BB's sidebar footer, or press **Ctrl+backtick**.
 Terminal mode opens straight into a shell, ready to type. Its quiet header holds
-only the ghost, current terminal selector, and hide control. Press the same shortcut,
+the ghost, session name and shortened directory, search, project environment, and hide controls. Press the same shortcut,
 use the **×**, or click outside to return to BB. Your shells keep running.
 
 ## Context and terminal selection
@@ -22,7 +22,7 @@ Changing directory inside a shell does not change its owner.
   An unavailable current machine/worktree produces a recovery state.
 - Navigating to another thread or project hides the overlay without stopping shells.
 
-**Cmd+K** (Ctrl+K on other platforms) opens the terminal switcher. The project
+The header’s search icon or **Cmd+K** (Ctrl+K on other platforms) opens the terminal switcher. The project
 filter sits on the right of the search row; **Cmd/Ctrl+P** opens it. It defaults to
 the project owning the current thread, or **No project**. Type in the picker to search projects. **All** shows terminals
 across every project, including projectless terminals. Selecting another project
@@ -30,13 +30,16 @@ filters the list without switching the active shell. Enter switches to the
 highlighted terminal, including terminals in another project; Escape returns to
 the existing shell.
 
-The selector follows BB’s **thread search** layout: terminal names on the first
-line and the working directory underneath. Recently used terminals come first,
+The selector uses a shared session list: terminal names, project and machine,
+and the working directory. The current terminal has a check and outlined row.
+On phones it fills the terminal body; on desktop it opens as a centered Spotlight-style palette.
+The project filter truncates long names, and the footer contains only New terminal.
+Touch devices focus the list without automatically opening the keyboard. Recently used terminals come first,
 and matching title text is highlighted. Search always finds terminals, including
 names starting with **>**.
 
-**New terminal** is the last result when search is empty. Arrow keys and Enter
-can select it, and it disappears while searching. It immediately starts a shell
+**New terminal** stays below the results, including while searching. Click it or
+Tab to it and press Enter to immediately start a shell
 in the selected project, or in the current BB context when the filter is **All**.
 For the current project it uses the thread's environment; other projects use
 their default checkout. **No project** starts in a machine's home directory.
@@ -45,7 +48,7 @@ Ownership is fixed at creation; existing shells and their restart directories ar
 Session **⋯** actions appear on hover or keyboard selection and stay visible on
 touch screens. Find is in the current session’s menu; Maximize/Restore is in the
 session menus. **Tab / Shift+Tab** cycles through search, the project filter, and
-the highlighted session's actions. Arrow keys navigate results or the project
+the highlighted session's actions, and New terminal. Arrow keys navigate results or the project
 menu. Escape closes a menu first, then the selector; in the shell it remains a
 terminal key. Terminal mode contains keyboard input, including portaled menus,
 so it does not reach BB's in-app shortcuts. OS-reserved shortcuts and native
@@ -87,7 +90,9 @@ existing bash DEBUG trap is preserved and may limit automatic command reporting.
   Unicode, mouse input, alternate-screen apps, safe OSC 8 web links, and bounded Kitty images.
 - Scrollback search with Cmd/Ctrl+F; Enter and Shift+Enter navigate matches.
   Search is case-insensitive, single-line, and capped at 1,000 matches.
-- A keyboard-aware fullscreen surface and extra keys on small screens.
+- A keyboard-aware fullscreen surface on phones, including landscape.
+- Esc, Tab, Stop (Ctrl+C), More, and Type/Hide shortcuts. More groups navigation,
+  modifiers, Shift+Tab, clipboard actions, and symbols without a scrolling key strip.
 - Live shortcut settings and typography matching BB's native terminal (12px).
 - Wheel/trackpad history scrolling and alternate-screen app scrolling. Hold Shift
   while scrolling to bypass an application's mouse reporting and scroll history.
@@ -141,7 +146,9 @@ Settings live under **Extensions → Floating Ghostty**:
 - **Custom opening size**: disabled by default. Apply **Width (px)** and **Height (px)**
   on each opening, independently of the centering preference. Defaults are 1100 × 720.
   A viewport smaller than either dimension uses fullscreen, as do BB's compact
-  viewports. Fullscreen never overwrites the remembered desktop geometry.
+  viewports. Phones remain fullscreen in landscape even with smaller custom
+  dimensions. Drag, resize, and Maximize/Restore are unavailable there.
+  Fullscreen never overwrites the remembered desktop geometry.
 
 The terminal matches BB's native 12px monospace rendering and shares the app's zoom.
 There is no separate plugin font-size setting.

@@ -13,6 +13,7 @@ import {
 import { toast } from "sonner";
 import { Icon } from "@/components/ui/icon";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { useMediaQuery } from "./ui/hooks/use-media-query";
 import { useIsCompactViewport } from "@/components/ui/hooks/use-compact-viewport";
 import { TerminalSwitcher } from "./terminal-switcher";
 import { TerminalManagement, type ManagementMode } from "./terminal-management";
@@ -110,7 +111,10 @@ export function FloatingTerminal({
     height: window.innerHeight,
   });
   const compact = useIsCompactViewport();
-  const sheet = compact || needsFullscreen(viewport, preferences);
+  // The short screen edge keeps phones fullscreen after rotation, even when
+  // a small custom desktop window would otherwise fit in landscape.
+  const phone = useMediaQuery("(pointer: coarse) and (max-device-width: 767px), (pointer: coarse) and (max-device-height: 767px)");
+  const sheet = compact || phone || needsFullscreen(viewport, preferences);
   const sheetRef = useRef(sheet);
   sheetRef.current = sheet;
 
@@ -275,8 +279,10 @@ export function FloatingTerminal({
     setScopes([]);
     setResolvedRoute(null);
     try {
-      const resolved = await rpc.call("resolveContext", route);
-      const result = await rpc.call("init");
+      const [resolved, result] = await Promise.all([
+        rpc.call("resolveContext", route),
+        rpc.call("init"),
+      ]);
       if (version !== requestVersion.current) return;
       setResolvedRoute(`${route.projectId}:${route.threadId}`);
       setTerminalContext(resolved.context);
@@ -955,6 +961,10 @@ export function FloatingTerminal({
           pump.setCtrlArmed(!ctrlArmed);
           return;
         case "action":
+          if (key.id === "keyboard") {
+            pump.focus();
+            return;
+          }
           if (key.id === "dismiss") {
             pump.blur();
             return;
@@ -984,6 +994,7 @@ export function FloatingTerminal({
   const availableTabs = resolvedRoute === routeKey ? state.tabs : [];
   const activeTab =
     availableTabs.find((tab) => tab.terminalId === activeId) ?? null;
+  const terminalLoading = loading || activeTab?.status === "connecting";
   useSwitcherTitles(
     rpc,
     availableTabs
@@ -1064,12 +1075,12 @@ export function FloatingTerminal({
             }
             onHide={hide}
             busy={loading || creating}
-            expanded={mode !== "shell"}
+            expanded={mode === "switch"}
             environmentOpen={mode === "environment"}
           />
         </div>
 
-        <div className="bb-fg-terminal-body relative min-h-0 flex-1">
+        <div className="bb-fg-terminal-body relative min-h-0 flex-1" aria-busy={terminalLoading}>
           {state.tabs
             .filter((tab) => visited.current.has(tab.terminalId))
             .map((tab) => (
@@ -1132,10 +1143,13 @@ export function FloatingTerminal({
             </button>
           ) : null}
 
-          {loading ? (
-            <div className="bb-fg-state" role="status">
-              <span className="bb-fg-loading-dot" />
-              Opening terminal…
+          {terminalLoading && !loadError && mode === "shell" ? (
+            <div className="bb-fg-state bb-fg-loading-state" role="status" aria-live="polite">
+              <span className="bb-fg-loading-spinner" aria-hidden="true" />
+              <div className="bb-fg-loading-copy">
+                <strong>{loading ? "Opening terminal…" : "Loading terminal…"}</strong>
+                <span>{loading ? "Connecting to your session" : "Preparing the terminal and loading output"}</span>
+              </div>
             </div>
           ) : null}
           {!loading && loadError ? (

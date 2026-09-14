@@ -19,24 +19,34 @@ export function TerminalHeader({
   expanded: boolean;
   environmentOpen: boolean;
 }) {
+  const directory = tab?.cwd ?? "";
+  const segments = directory.replace(/\\/g, "/").split("/").filter(Boolean);
+  const shortDirectory = segments.length > 2
+    ? `…/${segments.slice(-2).join("/")}`
+    : directory;
   return (
     <div className="bb-fg-header">
       <GhostMark className="bb-fg-header-ghost size-4 shrink-0" />
+      <div className="bb-fg-session-title">
+        <span className="bb-fg-header-name" title={tab ? tabName(tab) : "Terminal"}>
+          {tab ? tabName(tab) : "Terminal"}
+        </span>
+        {directory ? <span className="bb-fg-header-path" title={directory}>{shortDirectory}</span> : null}
+      </div>
       <button
-        className="bb-fg-session-trigger"
+        className="bb-fg-header-icon"
         type="button"
         data-no-drag=""
         aria-label="Switch terminal"
         aria-haspopup="dialog"
         aria-expanded={expanded}
-        title="Terminals (⌘K / Ctrl+K)"
+        data-active={expanded ? "true" : undefined}
+        title="Search terminals (⌘K / Ctrl+K)"
         onClick={onSwitch}
         disabled={busy}
       >
-        <span>{tab ? tabName(tab) : "Terminal"}</span>
-        <Icon name="ChevronDown" className="size-3.5 shrink-0" />
+        <Icon name="Search" className="size-4" />
       </button>
-      <span className="bb-fg-header-space" />
       {onEnvironment ? (
         <button
           className="bb-fg-header-icon"

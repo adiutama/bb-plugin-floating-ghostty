@@ -40,3 +40,15 @@ it("searches projects and selects the matching result with Enter", async () => {
   expect(onChange).toHaveBeenCalledWith("project:b");
   expect(onOpenChange).toHaveBeenCalledWith(false);
 }, 20000);
+
+it("lets touch users browse projects before focusing search", async () => {
+  vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });
+  HTMLElement.prototype.scrollIntoView = () => {};
+  const view = render(
+    <ProjectFilter open focusSearch={false} onOpenChange={() => {}} value="all"
+      options={[{ key: "all", label: "All" }, { key: "project:a", label: "Alpha" }]}
+      onChange={() => {}} onClose={() => {}} />,
+  );
+  await waitFor(() => expect(document.activeElement).toBe(view.getByRole("dialog", { name: "Filter by project" })));
+  expect(document.activeElement).not.toBe(view.getByRole("combobox", { name: "Search projects" }));
+}, 20000);
