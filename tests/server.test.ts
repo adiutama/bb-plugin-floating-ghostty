@@ -14,7 +14,7 @@ afterEach(async () => {
   vi.restoreAllMocks();
   for (const cleanup of cleanups.splice(0)) await cleanup();
 });
-async function setup(settings: Record<string, boolean | string> = {}) {
+async function setup(settings: Record<string, boolean | string> = {}, beforeHostCall: () => void = () => {}) {
   const { projectEnvironmentVault, ...declaredSettings } = settings;
   const dataDir = await mkdtemp(join(tmpdir(), "floating-ghostty-test-"));
   const host = createFakePluginHost({
@@ -22,6 +22,7 @@ async function setup(settings: Record<string, boolean | string> = {}) {
     dataDir,
     settings: declaredSettings,
     experimental_callHostRpc: async ({ method }) => {
+      beforeHostCall();
       if (method === "prepareProjectEnvironment")
         return { path: "/private/tmp/floating-ghostty/environment.sh" };
       throw new Error(`Unexpected host method ${method}`);
@@ -546,10 +547,10 @@ it("verifies exit after output becomes unavailable without treating a transport 
     status: "exited",
     exitCode: 3,
   });
-  expect(((await call("init", null)) as any).snapshot.tabs).toHaveLength(0);
+  expect(((await call("init", null)) as any).snapshot.tabs).toHaveLength(1);
 });
 
-it("prunes shells that exit while hidden and persists removal while retaining disconnected shells", async () => {
+it("retains exited and disconnected shells until explicitly closed", async () => {
   const { open, call, harness, sessions } = await setup();
   const first = await open();
   const second = await open();
@@ -565,13 +566,12 @@ it("prunes shells that exit while hidden and persists removal while retaining di
   vi.spyOn(Date, "now").mockReturnValue(Date.now() + 5000);
   const result = (await call("init", null)) as any;
   expect(result.snapshot.tabs.map((tab: any) => tab.terminalId)).toEqual([
+    first.opened.terminalId,
     second.opened.terminalId,
   ]);
-  expect(result.snapshot.revision).toBeGreaterThan(second.snapshot.revision);
-  expect(((await call("init", null)) as any).snapshot.tabs).toHaveLength(1);
-  await expect(
-    call("setActiveTab", { terminalId: first.opened.terminalId }),
-  ).rejects.toThrow("does not belong");
+  expect(result.snapshot.tabs[0].status).toBe("exited");
+  expect(((await call("init", null)) as any).snapshot.tabs).toHaveLength(2);
+  await expect(call("setActiveTab", { terminalId: first.opened.terminalId })).resolves.toBeDefined();
 });
 
 it("separates pinned names from automatic shell/command titles and persists both across reload", async () => {
@@ -729,4 +729,56 @@ it("updates the displayed working directory without moving project ownership or 
   await expect(
     call("setTabCwd", { terminalId: restarted.terminalId, cwd: "relative" }),
   ).rejects.toThrow();
+});
+
+it("answers only a new terminal's initial replay queries", async () => {
+  const { call, open, harness } = await setup();
+  const { opened } = await open();
+  harness.inspection.sdk.stub("terminals.output", async () => ({
+    chunks: [{ seq: 1, dataBase64: Buffer.from("\x1b[6n").toString("base64") }],
+    nextSeq: 1, truncated: false,
+  }));
+  const input = { terminalId: opened.terminalId, sinceSeq: 0, replay: true, attach: true };
+  expect(await call("read", { ...input, attach: false })).toMatchObject({ respondToQueries: false });
+  expect(await call("read", input)).toMatchObject({ respondToQueries: true });
+  expect(await call("read", input)).toMatchObject({ respondToQueries: false });
+});
+
+it("pushes saved values to existing project hosts, including shells created before any values", async () => {
+  const { call, harness } = await setup();
+  harness.inspection.sdk.stub("projects.list", async () => [{
+    id: "A", name: "Project A", sources: [{ hostId: "local", path: "/a", isDefault: true }],
+  }]);
+  await call("openTab", { scopeKey: "project:A", cols: 80, rows: 24 });
+  expect(harness.experimental_hostRpcCalls.at(-1)).toMatchObject({
+    input: { projectId: "A", entries: [] },
+  });
+  await call("saveProjectEnvironment", { projectId: "A", text: "NEW=value", expectedRevision: 0 });
+  expect(harness.experimental_hostRpcCalls.at(-1)).toMatchObject({
+    hostId: "local", input: { projectId: "A", entries: [{ key: "NEW", value: "value" }] },
+  });
+  expect(harness.inspection.sdk.callsTo("terminals.create")).toHaveLength(1);
+  expect(harness.inspection.sdk.callsTo("terminals.input")).toHaveLength(0);
+});
+
+
+it("retries saved environment values after a host reconnects without injecting terminal input", async () => {
+  let disconnected = false;
+  const { call, harness } = await setup({}, () => {
+    if (disconnected) throw new Error("host disconnected");
+  });
+  harness.inspection.sdk.stub("projects.list", async () => [{
+    id: "A", name: "Project A", sources: [{ hostId: "local", path: "/a", isDefault: true }],
+  }]);
+  const { opened } = await call("openTab", { scopeKey: "project:A", cols: 80, rows: 24 }) as any;
+  disconnected = true;
+  expect(await call("saveProjectEnvironment", { projectId: "A", text: "RECONNECT=latest", expectedRevision: 0 })).toMatchObject({ pendingHosts: 1 });
+  disconnected = false;
+  const before = harness.experimental_hostRpcCalls.length;
+  await call("read", { terminalId: opened.terminalId, sinceSeq: 0 });
+  await vi.waitFor(() => expect(harness.experimental_hostRpcCalls.length).toBeGreaterThan(before));
+  expect(harness.experimental_hostRpcCalls.at(-1)).toMatchObject({
+    input: { projectId: "A", entries: [{ key: "RECONNECT", value: "latest" }] },
+  });
+  expect(harness.inspection.sdk.callsTo("terminals.input")).toHaveLength(0);
 });

@@ -3,18 +3,20 @@ import { containTab } from "../lib/keyboard";
 import { tabName, type TabState } from "../lib/tabs";
 import { Icon } from "./ui/icon";
 
-export type ManagementMode = "rename" | "environment" | "delete";
+export type ManagementMode = "rename" | "environment" | "delete" | "restart";
 export function TerminalManagement({
   mode,
   tab,
   onName,
   onDelete,
+  onRestart,
   onDismiss,
 }: {
   mode: ManagementMode;
   tab: TabState;
   onName: (name: string | null) => Promise<void>;
   onDelete: () => Promise<void>;
+  onRestart?: () => Promise<void>;
   onDismiss: () => void;
 }) {
   const [name, setName] = useState(tab.customTitle ?? "");
@@ -46,7 +48,7 @@ export function TerminalManagement({
       setBusy(false);
     }
   };
-  const title = mode === "rename" ? "Rename terminal" : "Delete terminal";
+  const title = mode === "rename" ? "Rename terminal" : mode === "restart" ? "Restart terminal" : "Delete terminal";
   return (
     <div
       className="bb-fg-switcher-scrim"
@@ -79,7 +81,7 @@ export function TerminalManagement({
           onSubmit={(event) => {
             event.preventDefault();
             void save(
-              mode === "rename" ? () => onName(name.trim() || null) : onDelete,
+              mode === "rename" ? () => onName(name.trim() || null) : mode === "restart" ? onRestart! : onDelete,
             );
           }}
         >
@@ -101,15 +103,15 @@ export function TerminalManagement({
             </>
           ) : (
             <p className="bb-fg-management-note">
-              Delete <strong>{tabName(tab)}</strong>? This stops its shell and
-              running commands.
+              {mode === "restart" ? "Restart" : "Delete"} <strong>{tabName(tab)}</strong>? This stops its shell and
+              running commands.{mode === "restart" ? " A fresh shell will replace its output." : ""}
             </p>
           )}
           <div className="bb-fg-management-actions">
             <button
               type="button"
-              autoFocus={mode === "delete"}
-              data-initial-focus={mode === "delete" ? "" : undefined}
+              autoFocus={mode !== "rename"}
+              data-initial-focus={mode !== "rename" ? "" : undefined}
               onClick={onDismiss}
               disabled={busy}
             >
@@ -117,10 +119,10 @@ export function TerminalManagement({
             </button>
             <button
               type="submit"
-              className={mode === "delete" ? "bb-fg-danger" : "bb-fg-primary"}
+              className={mode !== "rename" ? "bb-fg-danger" : "bb-fg-primary"}
               disabled={busy}
             >
-              {busy ? "Saving…" : mode === "delete" ? "Delete" : "Save"}
+              {busy ? "Saving…" : mode === "delete" ? "Delete" : mode === "restart" ? "Restart" : "Save"}
             </button>
           </div>
         </form>

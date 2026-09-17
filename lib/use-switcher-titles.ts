@@ -13,7 +13,7 @@ export function useSwitcherTitles(
   enabled: boolean,
   onTitle: (terminalId: string, title: string | null) => void,
   onCwd?: (terminalId: string, cwd: string) => void,
-  onExit?: () => void,
+  onExit?: (terminalId: string, exitCode: number | null) => void,
 ): void {
   const idsKey = JSON.stringify(terminalIds);
   useEffect(() => {
@@ -46,7 +46,7 @@ export function useSwitcherTitles(
             });
             if (cancelled) return;
             if (output.status === "exited" || output.status === "gone")
-              onExit?.();
+              onExit?.(entry.terminalId, output.exitCode);
             for (const chunk of output.chunks) {
               entry.observer.consume(base64ToBytes(chunk.dataBase64));
             }

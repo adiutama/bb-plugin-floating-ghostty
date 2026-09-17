@@ -54,15 +54,17 @@ terminal key. Terminal mode contains keyboard input, including portaled menus,
 so it does not reach BB's in-app shortcuts. OS-reserved shortcuts and native
 application-menu commands remain controlled by BB/the operating system.
 
-Exited shells disappear automatically. The window selects another shell in the
-same project (or No project), or hides when that project has no shells left.
+Exited shells keep their output visible. Use **Start again** to launch a new
+shell or **Close** to remove the terminal.
 
 The variable button beside **×** opens the active project’s environment directly.
 Each project session’s **⋯** menu also provides **Project environment…** alongside
 **Rename…**, **Restart shell**, and **Delete terminal…**. The environment editor
-accepts strict dotenv assignments and applies them to new or restarted shells in
-every worktree owned by that project. Existing shells keep the environment they
-started with. The plugin Settings page lists configured project environments
+accepts strict dotenv assignments and applies them at the next prompt in zsh,
+bash, and fish across every worktree owned by that project. Running commands keep
+their current environment. Removed variables are unset. Shells opened before this
+update need one restart to install the refresh hook; other shells apply values at
+startup. The plugin Settings page lists configured project environments
 and lets you search, inspect, and edit each one.
 Managing another session leaves your current shell selected.
 Closing a management dialog returns to the selector with its search and filter
@@ -173,7 +175,7 @@ registration with the BB frontend harness.
 
 An additional smoke test exercises the **running BB server**, creates a temporary
 shell, sends input, renders its output through the real Ghostty engine, tests
-resize/replay/restart and automatic exit removal, and cleans up its test shells:
+resize/replay/restart and retained exit output, and cleans up its test shells:
 
 ```sh
 npm run test:live
@@ -233,3 +235,26 @@ Derived from two MIT-licensed BB plugins:
 
 See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for exact source revisions
 and dependency licenses. Plugin code is [MIT licensed](LICENSE).
+
+### Terminal polish
+
+- Prompt text remains visible after clearing, hiding, and reopening the terminal.
+- Cmd+N creates a shell in the current conversation context; in the selector it
+  uses the selected project, just like the New terminal button.
+- Project environment additions, changes, and removals apply at the next prompt
+  in fish, zsh, and bash. New shells use the latest saved revision. Updates never
+  type commands into the PTY. Disconnected hosts retry as their terminals resume
+  polling. Shells started before the integration was installed need one restart.
+- Cmd+A selects all retained output, including virtualized history. Ctrl+Shift+A
+  provides the same action. Copy captures that selection as it existed when selected.
+- On macOS, Cmd+F opens Find; Ctrl+F and Ctrl+V reach the shell. Cmd+Left/Right
+  move to line start/end; modified arrows preserve their modifiers in legacy mode.
+- Toolbar input and paste return to the latest output, like physical typing.
+- Exited shells retain their output with Start again and Close actions. Restarting
+  from the selector asks before stopping the shell and replacing its output.
+- Cell backgrounds stay within cells. Cursor shape/blink requests are observed
+  across output chunks; supported RGB theme colors are reflected in OSC 10/11 replies.
+- Search includes all retained matches and maps wide glyphs to terminal columns.
+  Search and full-history copy still use physical rows: the pinned Ghostty WASM
+  does not expose soft-wrap boundaries. IME candidate positioning, screen-reader
+  output announcements, and drag selection across unmounted history remain future work.

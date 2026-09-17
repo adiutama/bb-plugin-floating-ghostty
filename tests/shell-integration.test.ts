@@ -4,6 +4,7 @@ import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { existsSync } from "node:fs";
+import { environmentRefreshScripts } from "../lib/environment-files";
 import { shellStartCommand } from "../lib/shell-integration";
 
 for (const shell of ["zsh", "bash", "fish"]) {
@@ -11,7 +12,7 @@ for (const shell of ["zsh", "bash", "fish"]) {
     .map((directory) => join(directory, shell))
     .find(existsSync);
   it.skipIf(!executable)(
-    `${shell} reports its idle shell and running command, then removes private startup files`,
+    `${shell} reports its idle shell and running command, refreshes project values without restarting, then removes private startup files`,
     async () => {
       const directory = await mkdtemp(join(tmpdir(), "fg-shell-test-"));
       try {
@@ -20,11 +21,9 @@ for (const shell of ["zsh", "bash", "fish"]) {
           "export BB_FG_TEST_CONFIG=loaded\n",
         );
         const environmentPath = join(directory, "project-environment.sh");
-        await writeFile(
-          environmentPath,
-          "export BB_FG_TEST_CONFIG='injected'\n",
-          { mode: 0o600 },
-        );
+        const scripts = environmentRefreshScripts([{ key: "BB_FG_TEST_CONFIG", value: "injected" }]);
+        await writeFile(environmentPath, scripts.sh, { mode: 0o600 });
+        await writeFile(`${environmentPath}.fish`, scripts.fish, { mode: 0o600 });
         const command = shellStartCommand(environmentPath);
         const needsTty = shell === "fish";
         // Node's "pipe" is a socket on macOS; script requires a real pipe or tty.
@@ -62,8 +61,9 @@ for (const shell of ["zsh", "bash", "fish"]) {
         );
         let output = "";
         let sentCommands = false;
+        let stage = 0;
         const commands =
-          "sleep 0.01\nprintf 'config=%s\\n' \"$BB_FG_TEST_CONFIG\"\nexit\n";
+          "sleep 0.01\nprintf 'config=%s\\n' \"$BB_FG_TEST_CONFIG\"\n";
         child.stdout.on("data", (chunk) => {
           output += chunk;
           if (
@@ -87,6 +87,29 @@ for (const shell of ["zsh", "bash", "fish"]) {
             sentCommands = true;
             child.stdin.write(commands.replaceAll("\n", "\r"));
           }
+          if (stage === 0 && output.includes("config=injected")) {
+            stage = 1;
+            const changed = environmentRefreshScripts([
+              { key: "BB_FG_TEST_CONFIG", value: "updated" },
+              { key: "BB_FG_TEST_ADDED", value: "added" },
+              { key: "BB_FG_LITERAL", value: "quotes ' \\ $HOME $(printf unsafe) `printf unsafe`" },
+            ]);
+            void Promise.all([
+              writeFile(environmentPath, changed.sh),
+              writeFile(`${environmentPath}.fish`, changed.fish),
+            ]).then(() => child.stdin.write(
+              "\nprintf 'literal=%s\\n' \"$BB_FG_LITERAL\"\nprintf 'updated=%s added=%s\\n' \"$BB_FG_TEST_CONFIG\" \"$BB_FG_TEST_ADDED\"\n".replaceAll("\n", needsTty ? "\r" : "\n"),
+            ));
+          } else if (stage === 1 && output.includes("updated=updated added=added")) {
+            stage = 2;
+            const cleared = environmentRefreshScripts([]);
+            void Promise.all([
+              writeFile(environmentPath, cleared.sh),
+              writeFile(`${environmentPath}.fish`, cleared.fish),
+            ]).then(() => child.stdin.write(
+              "\nprintf 'cleared=[%s][%s]\\n' \"$BB_FG_TEST_CONFIG\" \"$BB_FG_TEST_ADDED\"\nexit\n".replaceAll("\n", needsTty ? "\r" : "\n"),
+            ));
+          }
           if (needsTty && output.includes("bb-fg:command:exit"))
             child.stdin.end();
         });
@@ -101,7 +124,7 @@ for (const shell of ["zsh", "bash", "fish"]) {
           child.on("error", reject);
           child.on("exit", resolve);
         });
-        if (!needsTty) child.stdin.end(commands);
+        if (!needsTty) child.stdin.write(commands);
         try {
           expect(await exit, output.slice(-1200)).toBe(0);
         } finally {
@@ -116,8 +139,11 @@ for (const shell of ["zsh", "bash", "fish"]) {
         expect(
           titles.filter((title) => title === `bb-fg:shell:${shell}`).length,
         ).toBeGreaterThan(1);
-        expect(output.includes("config=injected")).toBe(true);
-        expect(existsSync(environmentPath)).toBe(false);
+        expect(output).toContain("config=injected");
+        expect(output).toContain("updated=updated added=added");
+        expect(output).toContain("literal=quotes ' \\ $HOME $(printf unsafe) `printf unsafe`");
+        expect(output).toContain("cleared=[][]");
+        expect(existsSync(environmentPath)).toBe(true);
         expect(
           (await readdir(directory)).filter((name) =>
             name.startsWith("bb-ghostty."),

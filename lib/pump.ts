@@ -8,6 +8,8 @@ import {
   encodeInputChunks,
   normalizeTerminalTitle,
 } from "./terminal-io";
+import { TerminalPresentation, oscColor } from "./terminal-presentation";
+import { terminalText } from "./terminal-selection";
 import { controlCode } from "./keys";
 import { resolveMonoFont } from "./theme";
 import { loadCore } from "./ghostty";
@@ -42,6 +44,8 @@ export interface PumpOptions {
 }
 
 export class TerminalPump {
+  private presentation: TerminalPresentation;
+  private queryColors: { foreground: string | null; background: string | null } = { foreground: null, background: null };
   private terminal: WTerm | null = null;
   private core: GhosttyCore | null = null;
   private readonly options: PumpOptions;
@@ -66,6 +70,7 @@ export class TerminalPump {
   private resizeObserver: ResizeObserver;
   private fitFrame: number | null = null;
   private fitting = false;
+  private selectionSnapshot: HTMLPreElement | null = null;
   private searchQuery = "";
   private searchIndex = -1;
   private abort = new AbortController();
@@ -76,6 +81,7 @@ export class TerminalPump {
 
   constructor(options: PumpOptions) {
     this.options = options;
+    this.presentation = new TerminalPresentation(options.container);
     this.fontSize = options.fontSize;
     installTerminalScrolling({
       element: options.container,
@@ -88,6 +94,12 @@ export class TerminalPump {
       send: (input) => this.send(input),
       signal: this.abort.signal,
     });
+    options.container.addEventListener("pointerdown", () => this.clearSelectionSnapshot(), { signal: this.abort.signal });
+    options.container.addEventListener("copy", (event) => {
+      if (!this.selectionSnapshot || !event.clipboardData) return;
+      event.preventDefault();
+      event.clipboardData.setData("text/plain", this.selectionSnapshot.textContent ?? "");
+    }, { signal: this.abort.signal });
     options.container.dataset.renderer = "ghostty";
     this.applyFont();
     this.refreshTheme();
@@ -140,6 +152,11 @@ export class TerminalPump {
         return;
       }
       this.core = core;
+      const response = core.getResponse.bind(core);
+      core.getResponse = () => response()?.replace(/(\x1b\])(10|11);rgb:[0-9a-f/]+/gi, (original, prefix: string, code: string) => {
+        const color = code === "10" ? this.queryColors.foreground : this.queryColors.background;
+        return color ? `${prefix}${code};${color}` : original;
+      }) ?? null;
       const terminal = new WTerm(this.options.container, {
         core,
         // Keep Wterm's cell-metric updates for selection and scrolling.
@@ -166,6 +183,13 @@ export class TerminalPump {
         terminal.destroy();
         core.dispose();
         return;
+      }
+      const input = this.options.container.querySelector("textarea");
+      if (input) {
+        input.removeAttribute("aria-hidden");
+        input.setAttribute("aria-label", "Terminal input");
+        input.style.left = "0";
+        input.style.top = "0";
       }
       this.applyFont();
       this.refreshTheme();
@@ -208,7 +232,7 @@ export class TerminalPump {
   }
 
   private readonly onKeyDown = (event: KeyboardEvent): void => {
-    if (event.defaultPrevented) return;
+    if (event.defaultPrevented || event.isComposing) return;
     const stop = () => {
       event.preventDefault();
       event.stopPropagation();
@@ -222,10 +246,33 @@ export class TerminalPump {
         return;
       }
     }
-    if ((event.metaKey || event.ctrlKey) && event.key === "f") {
+    const mac = navigator.platform.startsWith("Mac");
+    const key = event.key.toLowerCase();
+    if (((event.metaKey && !event.ctrlKey) || (event.ctrlKey && event.shiftKey)) && key === "a" && !event.altKey) {
+      stop();
+      this.selectAll();
+      return;
+    }
+    if ((event.metaKey || (event.ctrlKey && (!mac || event.shiftKey))) && key === "f") {
       stop();
       this.options.onFindRequested?.();
       return;
+    }
+    // The browser owns Cmd+V on macOS; Ctrl+V belongs to the running program.
+    if (mac && event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && key === "v" && !this.core?.kittyKeyboardFlags()) {
+      stop();
+      this.send("\x16");
+      return;
+    }
+    if (!this.core?.kittyKeyboardFlags() && /^Arrow(Left|Right|Up|Down)$/.test(event.key)) {
+      let sequence: string | null = null;
+      if (mac && event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey && (key === "arrowleft" || key === "arrowright")) {
+        sequence = key === "arrowleft" ? "\x01" : "\x05";
+      } else if (!event.metaKey && (event.ctrlKey || event.altKey || event.shiftKey)) {
+        const final = { ArrowUp: "A", ArrowDown: "B", ArrowRight: "C", ArrowLeft: "D" }[event.key];
+        sequence = `\x1b[1;${1 + Number(event.shiftKey) + 2 * Number(event.altKey) + 4 * Number(event.ctrlKey)}${final}`;
+      }
+      if (sequence) { stop(); this.send(sequence); return; }
     }
     const selection = window.getSelection();
     if (
@@ -241,6 +288,28 @@ export class TerminalPump {
     }
   };
 
+  private clearSelectionSnapshot(): void {
+    this.selectionSnapshot?.remove();
+    this.selectionSnapshot = null;
+    this.options.container.classList.remove("bb-fg-select-all");
+  }
+
+  private selectAll(): void {
+    if (!this.core) return;
+    this.clearSelectionSnapshot();
+    const snapshot = document.createElement("pre");
+    snapshot.className = "bb-fg-selection-snapshot";
+    snapshot.textContent = terminalText(this.core);
+    this.options.container.append(snapshot);
+    this.selectionSnapshot = snapshot;
+    const range = document.createRange();
+    range.selectNodeContents(snapshot);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    this.options.container.classList.add("bb-fg-select-all");
+  }
+
   private applyFont(): void {
     const el = this.options.container;
     el.style.setProperty("--term-font-family", resolveMonoFont(el));
@@ -253,6 +322,7 @@ export class TerminalPump {
 
   private writeOutput(bytes: Uint8Array, replay: boolean): void {
     this.titleObserver.consume(bytes);
+    this.presentation.consume(bytes);
     if (replay) this.replayWrites++;
     try {
       this.terminal?.write(bytes);
@@ -316,6 +386,7 @@ export class TerminalPump {
   }
   private handleInput(data: string): void {
     if (this.disposed) return;
+    this.clearSelectionSnapshot();
     if (this.ctrlArmed && data.length === 1) {
       const control = controlCode(data);
       if (control !== null) {
@@ -329,6 +400,8 @@ export class TerminalPump {
 
   /** Write bytes as if they had been typed. Used by the on-screen key bar. */
   send(data: string): void {
+    this.clearSelectionSnapshot();
+    this.scrollToBottom();
     this.handleInput(data);
   }
 
@@ -429,7 +502,7 @@ export class TerminalPump {
 
   private schedule(delay: number): void {
     this.stopPolling();
-    if (this.disposed || !this.visible || !this.started) return;
+    if (this.disposed || !this.visible || !this.started || this.status === "exited") return;
     // A read already in flight will schedule the next one when it lands;
     // arming another here is what duplicates output.
     if (this.reading) return;
@@ -525,11 +598,13 @@ export class TerminalPump {
         terminalId: this.options.terminalId,
         sinceSeq: 0,
         replay: true,
+        attach: true,
       });
       if (!this.disposed) {
+        this.presentation.reset();
         this.terminal?.write("\x1bc");
         for (const chunk of result.chunks) {
-          this.writeOutput(base64ToBytes(chunk.dataBase64), true);
+          this.writeOutput(base64ToBytes(chunk.dataBase64), !result.respondToQueries);
         }
         this.nextSeq = result.nextSeq;
         this.replayPending = false;
@@ -632,6 +707,14 @@ export class TerminalPump {
     el.style.setProperty("--term-cursor", "var(--foreground)");
     el.style.setProperty("--term-color-0", "var(--background)");
     el.style.setProperty("--term-color-7", "var(--foreground)");
+    const probe = document.createElement("span");
+    probe.style.cssText = "position:absolute;visibility:hidden;pointer-events:none";
+    el.append(probe);
+    probe.style.color = "var(--foreground)";
+    this.queryColors.foreground = oscColor(getComputedStyle(probe).color);
+    probe.style.color = "var(--background)";
+    this.queryColors.background = oscColor(getComputedStyle(probe).color);
+    probe.remove();
   }
   paste(text: string): void {
     this.send(

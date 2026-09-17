@@ -19,6 +19,7 @@ export function searchTerminal(
   const matches: { row: number; column: number }[] = [];
   for (let row = 0; row < history + core.getRows(); row++) {
     let text = "";
+    const columns: number[] = [];
     const width =
       row < history ? core.getScrollbackLineLen(row) : core.getCols();
     for (let col = 0; col < width; col++) {
@@ -27,7 +28,9 @@ export function searchTerminal(
           ? core.getScrollbackCell(row, col)
           : core.getCell(row - history, col);
       if (cell.width === 0) continue;
-      text += cell.chars ?? String.fromCodePoint(cell.char || 32);
+      const glyph = (cell.chars ?? String.fromCodePoint(cell.char || 32)).toLocaleLowerCase();
+      for (let i = 0; i < glyph.length; i++) columns.push(col);
+      text += glyph;
     }
     const line = text.toLocaleLowerCase();
     for (
@@ -35,8 +38,8 @@ export function searchTerminal(
       at !== -1;
       at = line.indexOf(needle, at + needle.length)
     ) {
-      matches.push({ row, column: at });
-      if (matches.length >= 1000) return matches;
+      matches.push({ row, column: columns[at] ?? at });
+
     }
   }
   return matches;

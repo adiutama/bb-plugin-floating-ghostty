@@ -269,14 +269,13 @@ try {
   assert.equal(exitState.exitCode, 7);
   const afterExit = await rpc("init", null);
   assert(
-    !afterExit.snapshot.tabs.some(
+    afterExit.snapshot.tabs.some(
       (tab) => tab.terminalId === opened.terminalId,
     ),
-    "Exited shell remained in the inventory",
+    "Exited shell disappeared before its output could be reviewed",
   );
-  owned.delete(opened.terminalId);
   console.log(
-    "PASS: authenticated WASM, real shell input/output, Ghostty rendering, resize, tab persistence, replay, automatic exit removal",
+    "PASS: authenticated WASM, real shell input/output, Ghostty rendering, resize, tab persistence, replay, retained exited shell",
   );
 } finally {
   core?.dispose();

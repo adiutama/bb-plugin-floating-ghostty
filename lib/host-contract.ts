@@ -9,6 +9,7 @@ export const hostContract = defineRpcContract({
   prepareProjectEnvironment: {
     input: z
       .object({
+        projectId: z.string().min(1),
         entries: z
           .array(
             z

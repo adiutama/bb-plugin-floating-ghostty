@@ -301,7 +301,7 @@ async function setup(
   return Object.assign(slot, {
     exitTerminal: (terminalId: string, notify = true) => {
       exited.add(terminalId);
-      tabs = tabs.filter((tab) => tab.terminalId !== terminalId);
+      tabs = tabs.map((tab) => tab.terminalId === terminalId ? { ...tab, status: "exited" } : tab);
       revision++;
       if (notify)
         slot
@@ -320,7 +320,7 @@ function switcher(target: Element | Window = window) {
 }
 
 it.each(["project:A", "home:local"])(
-  "keeps exit fallback within %s and hides when only other projects remain",
+  "retains the exited shell in %s until explicitly closed",
   async (scopeKey) => {
     const slot = await setup(
       [
@@ -334,11 +334,10 @@ it.each(["project:A", "home:local"])(
       await act(async () => toggle());
       await slot.findByRole("textbox", { name: "Shell first" });
       await act(async () => slot.exitTerminal("first"));
-      await slot.findByRole("textbox", { name: "Shell second" });
-      expect(slot.queryByRole("textbox", { name: "Shell first" })).toBeNull();
+      expect(slot.getByRole("textbox", { name: "Shell first" })).toBeTruthy();
+      expect(slot.getByText("Shell exited with code 0")).toBeTruthy();
+      expect(slot.getByRole("button", { name: "Start again" })).toBeTruthy();
       expect(windowController.isOpen()).toBe(true);
-      await act(async () => slot.exitTerminal("second"));
-      await waitFor(() => expect(windowController.isOpen()).toBe(false));
       expect(
         slot.inspection.rpcCalls.some((call) =>
           ["openTab", "restartTab", "closeTab"].includes(call.method),
@@ -350,7 +349,7 @@ it.each(["project:A", "home:local"])(
   },
 );
 
-it("removes an unvisited exited shell when search discovers it without changing the active shell", async () => {
+it("retains an unvisited exited shell when search discovers it without changing the active shell", async () => {
   const slot = await setup([
     tab("first", "project:A"),
     tab("hidden", "project:A"),
@@ -362,13 +361,13 @@ it("removes an unvisited exited shell when search discovers it without changing 
     await act(async () => switcher());
     await slot.findByPlaceholderText("Search terminals");
     await waitFor(() =>
-      expect(slot.queryByRole("option", { name: /^hidden/ })).toBeNull(),
+      expect(slot.queryByRole("option", { name: /^hidden/ })).not.toBeNull(),
     );
     expect(slot.getByRole("option", { name: /^first/ })).toBeTruthy();
     expect(windowController.isOpen()).toBe(true);
     expect(
       slot.inspection.rpcCalls.filter((call) => call.method === "init"),
-    ).toHaveLength(2);
+    ).toHaveLength(1);
   } finally {
     slot.lifecycle.unmount();
   }
@@ -489,7 +488,8 @@ it("defaults to the thread project, opens project filters with Cmd+P, and switch
     const foreign = slot.getByRole("textbox", { name: "Shell foreign" });
     await waitFor(() => expect(document.activeElement).toBe(foreign));
     await act(async () => slot.exitTerminal("foreign"));
-    await waitFor(() => expect(windowController.isOpen()).toBe(false));
+    expect(windowController.isOpen()).toBe(true);
+    expect(slot.getByText("Shell exited with code 0")).toBeTruthy();
     expect(
       slot.inspection.rpcCalls.some((call) =>
         ["openTab", "closeTab"].includes(call.method),
@@ -712,7 +712,7 @@ it("creates immediately in the current context even while viewing a sibling shel
   }
 });
 
-it("creates in the selected project and offers no ownership transfer", async () => {
+it("creates in the selected project with Cmd+N and offers no ownership transfer", async () => {
   const slot = await setup([tab("current", "worktree:A:one")]);
   try {
     await act(async () => toggle());
@@ -750,8 +750,8 @@ it("creates in the selected project and offers no ownership transfer", async () 
     await waitFor(() => expect(document.activeElement).toBe(search));
     const create = slot.getByRole("button", { name: "New terminal" });
     expect(create.getAttribute("title")).toContain("Project B");
-    // Creation stays outside the results and uses the selected project.
-    await act(async () => fireEvent.click(create));
+    // Cmd+N invokes the same selected-project action as the visible button.
+    await act(async () => fireEvent.keyDown(search, { key: "n", metaKey: true }));
     await slot.findByRole("textbox", { name: "Shell created-1" });
     expect(
       slot.inspection.rpcCalls
@@ -1044,6 +1044,10 @@ it("manages a filtered inactive terminal without changing shells and preserves t
     expect(
       slot.container.querySelector(".bb-fg-header-name")?.textContent,
     ).toBe("current");
+    expect(slot.inspection.rpcCalls.some(call => call.method === "restartTab")).toBe(false);
+    const confirmation = slot.getByRole("dialog", { name: "Restart terminal" });
+    await act(async () => fireEvent.click(within(confirmation).getByRole("button", { name: "Restart" })));
+    await waitFor(() => expect(document.activeElement).toBe(search));
     expect(
       slot.inspection.rpcCalls
         .filter((call) => call.method === "restartTab")
@@ -1281,4 +1285,20 @@ it("keeps the loading indicator until the terminal confirms its first output is 
     release();
     slot.lifecycle.unmount();
   }
+});
+
+it("opens one new terminal with Cmd+N and leaves the shortcut alone when hidden", async () => {
+  const slot = await setup([tab("current", "worktree:A:one")]);
+  try {
+    await act(async () => fireEvent.keyDown(window, { key: "n", metaKey: true }));
+    expect(slot.inspection.rpcCalls.filter((call) => call.method === "openTab")).toHaveLength(0);
+    await act(async () => toggle());
+    const shell = await slot.findByRole("textbox", { name: "Shell current" });
+    await act(async () => fireEvent.keyDown(shell, { key: "n", metaKey: true }));
+    await slot.findByRole("textbox", { name: "Shell created-1" });
+    await act(async () => fireEvent.keyDown(window, { key: "n", metaKey: true, repeat: true }));
+    const creates = slot.inspection.rpcCalls.filter((call) => call.method === "openTab");
+    expect(creates).toHaveLength(1);
+    expect(creates[0]?.input).toMatchObject({ scopeKey: "worktree:A:one" });
+  } finally { slot.lifecycle.unmount(); }
 });

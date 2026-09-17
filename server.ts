@@ -140,7 +140,11 @@ export const rpcContract = defineRpcContract({
       })
       .strict(),
     output: z
-      .object({ revision: z.number().int().min(0), keyCount: z.number().int().min(0) })
+      .object({
+        revision: z.number().int().min(0),
+        keyCount: z.number().int().min(0),
+        pendingHosts: z.number().int().min(0).optional(),
+      })
       .strict(),
   },
   /** Everything the window needs on open: directories, surviving tabs, prefs. */
@@ -220,6 +224,7 @@ export const rpcContract = defineRpcContract({
         terminalId: z.string(),
         sinceSeq: z.number().int().min(0),
         replay: z.boolean().optional(),
+        attach: z.boolean().optional(),
       })
       .strict(),
     output: z.object({
@@ -229,6 +234,8 @@ export const rpcContract = defineRpcContract({
       nextSeq: z.number().int(),
       /** True when the ring buffer dropped bytes before `sinceSeq`. */
       truncated: z.boolean(),
+      /** First renderer attachment: startup queries still need replies. */
+      respondToQueries: z.boolean().optional(),
       /** Present on idle reads and when the session is gone. */
       status: z.string().nullable(),
       exitCode: z.number().int().nullable(),
@@ -632,12 +639,10 @@ export default async function plugin(bb: BbPluginApi) {
       : [];
   }
 
-  async function requireOwnedTab(terminalId: string): Promise<void> {
-    if (
-      !(await readStoredTabs()).some((tab) => tab.terminalId === terminalId)
-    ) {
-      throw new Error("That terminal does not belong to Floating Ghostty.");
-    }
+  async function requireOwnedTab(terminalId: string): Promise<StoredTab> {
+    const tab = (await readStoredTabs()).find((tab) => tab.terminalId === terminalId);
+    if (!tab) throw new Error("That terminal does not belong to Floating Ghostty.");
+    return tab;
   }
 
   async function confirmedAbsent(entry: StoredTab): Promise<boolean> {
@@ -736,7 +741,10 @@ export default async function plugin(bb: BbPluginApi) {
     statusCache.set(terminalId, { at: Date.now(), status, exitCode });
   }
 
+  const unattachedSessions = new Set<string>();
+
   function forgetTab(terminalId: string): void {
+    unattachedSessions.delete(terminalId);
     lastKnownTabs.delete(terminalId);
     statusCache.delete(terminalId);
   }
@@ -799,10 +807,6 @@ export default async function plugin(bb: BbPluginApi) {
             "terminals.get",
           );
           rememberStatus(session.id, session.status, session.exitCode);
-          if (session.status === "exited") {
-            forgetTab(entry.terminalId);
-            return null;
-          }
           const scope =
             scopes.find(
               (item) => item.key === (entry.launchScopeKey ?? entry.scopeKey),
@@ -937,6 +941,43 @@ export default async function plugin(bb: BbPluginApi) {
     return scope;
   }
 
+  const environmentHosts = new Map<string, Set<string>>();
+  const appliedEnvironments = new Map<string, number>();
+  const environmentRetries = new Map<string, number>();
+  const environmentInFlight = new Set<string>();
+  const environmentHostKey = (projectId: string, hostId: string) => JSON.stringify([projectId, hostId]);
+
+  // Retry after reconnect (and after a plugin reload) without holding output
+  // polling behind host RPC. Saves and retries share the revision ordering.
+  function refreshSessionEnvironment(tab: StoredTab): void {
+    const projectId = ownerOf(tab.scopeKey).projectId;
+    const hostId = tab.hostId;
+    if (!projectId || !hostId) return;
+    const key = environmentHostKey(projectId, hostId);
+    const revision = getStoredEnvironment(projectId)?.revision ?? 0;
+    if (appliedEnvironments.get(key) === revision || environmentInFlight.has(key) ||
+        Date.now() < (environmentRetries.get(key) ?? 0)) return;
+    environmentInFlight.add(key);
+    void serializeEnvironment(async () => {
+      const stored = getStoredEnvironment(projectId);
+      await host.call("prepareProjectEnvironment", {
+        projectId, entries: parseProjectEnvironment(stored?.text ?? ""),
+      }, { hostId });
+      appliedEnvironments.set(key, stored?.revision ?? 0);
+      environmentRetries.delete(key);
+    }).catch(() => {
+      environmentRetries.set(key, Date.now() + 5000);
+    }).finally(() => environmentInFlight.delete(key));
+  }
+  // Order saves and startup file preparation without blocking terminal reads,
+  // closes, or snapshots behind a disconnected host.
+  let environmentTail: Promise<unknown> = Promise.resolve();
+  function serializeEnvironment<T>(action: () => Promise<T>): Promise<T> {
+    const result = environmentTail.then(action);
+    environmentTail = result.catch(() => {});
+    return result;
+  }
+
   async function createSession(
     scope: Scope,
     cols: number,
@@ -945,18 +986,20 @@ export default async function plugin(bb: BbPluginApi) {
     let environmentFile: string | null = null;
     const projectId = ownerOf(scope.key).projectId;
     if (projectId !== null) {
-      const stored = getStoredEnvironment(projectId);
-      if (stored !== undefined) {
-        const entries = parseProjectEnvironment(stored.text);
-        if (entries.length > 0) {
-          const prepared = await host.call(
-            "prepareProjectEnvironment",
-            { entries },
-            { hostId: scope.hostId },
-          );
-          environmentFile = prepared.path;
-        }
-      }
+      const prepared = await serializeEnvironment(async () => {
+        const hosts = environmentHosts.get(projectId) ?? new Set<string>();
+        hosts.add(scope.hostId);
+        environmentHosts.set(projectId, hosts);
+        const stored = getStoredEnvironment(projectId);
+        const prepared = await host.call(
+          "prepareProjectEnvironment",
+          { projectId, entries: parseProjectEnvironment(stored?.text ?? "") },
+          { hostId: scope.hostId },
+        );
+        appliedEnvironments.set(environmentHostKey(projectId, scope.hostId), stored?.revision ?? 0);
+        return prepared;
+      });
+      environmentFile = prepared.path;
     }
     const created = await withTimeout(
       bb.sdk.terminals.create({
@@ -975,6 +1018,7 @@ export default async function plugin(bb: BbPluginApi) {
       CREATE_TIMEOUT_MS,
       "terminals.create",
     );
+    unattachedSessions.add(created.id);
     bb.log.info(`opened ${created.id} in ${created.initialCwd}`);
     return {
       terminalId: created.id,
@@ -1086,7 +1130,7 @@ export default async function plugin(bb: BbPluginApi) {
 
     async saveProjectEnvironment({ projectId, text, expectedRevision }) {
       const entries = parseProjectEnvironment(text);
-      return serialize(async () => {
+      return serializeEnvironment(async () => {
         const stored = getStoredEnvironments();
         const currentRevision = stored[projectId]?.revision ?? 0;
         if (currentRevision !== expectedRevision) {
@@ -1117,9 +1161,25 @@ export default async function plugin(bb: BbPluginApi) {
           next.updatedAt,
         );
         await secureEnvironmentDatabaseFiles();
+        const hosts = new Set([
+          ...(environmentHosts.get(projectId) ?? []),
+          ...(await readStoredTabs())
+            .filter((tab) => ownerOf(tab.scopeKey).projectId === projectId)
+            .map((tab) => tab.hostId)
+            .filter((id): id is string => id !== undefined),
+        ]);
+        const updates = await Promise.allSettled([...hosts].map(async (hostId) => {
+          await host.call("prepareProjectEnvironment", { projectId, entries }, { hostId });
+          const key = environmentHostKey(projectId, hostId);
+          appliedEnvironments.set(key, currentRevision + 1);
+          environmentRetries.delete(key);
+        }));
         return {
           revision: currentRevision + 1,
           keyCount: entries.length,
+          ...(updates.some((update) => update.status === "rejected")
+            ? { pendingHosts: updates.filter((update) => update.status === "rejected").length }
+            : {}),
         };
       });
     },
@@ -1331,8 +1391,9 @@ export default async function plugin(bb: BbPluginApi) {
       });
     },
 
-    async read({ terminalId, sinceSeq, replay }) {
-      await requireOwnedTab(terminalId);
+    async read({ terminalId, sinceSeq, replay, attach }) {
+      const tab = await requireOwnedTab(terminalId);
+      refreshSessionEnvironment(tab);
       try {
         const output = await withTimeout(
           bb.sdk.terminals.output({
@@ -1343,10 +1404,12 @@ export default async function plugin(bb: BbPluginApi) {
           SDK_TIMEOUT_MS,
           "terminals.output",
         );
+        // Title-only observers must not consume the renderer’s first attachment.
+        const respondToQueries = attach === true && unattachedSessions.delete(terminalId);
         if (output.chunks.length > 0) {
           // Bytes are flowing, so the shell is alive by definition.
           rememberStatus(terminalId, "running", null);
-          return { ...output, status: null, exitCode: null };
+          return { ...output, respondToQueries, status: null, exitCode: null };
         }
         // This is the hot polling path — every idle window polls it at up to
         // ~3Hz — so the status round trip runs at most once per TTL rather
@@ -1366,7 +1429,7 @@ export default async function plugin(bb: BbPluginApi) {
         );
         rememberStatus(terminalId, session.status, session.exitCode);
         if (!isLiveStatus(session.status)) {
-          // The next snapshot removes the exited shell from the inventory.
+          // Refresh the next snapshot with the retained shell’s exit status.
           lastVerifiedAt = 0;
         }
         return {
@@ -1387,7 +1450,7 @@ export default async function plugin(bb: BbPluginApi) {
           };
         }
         // BB rejects output reads after process exit. Verify the lifecycle state
-        // so the UI can remove it, without calling a network error death.
+        // so the UI can show its exit status without treating a network error as exit.
         try {
           const session = await withTimeout(
             bb.sdk.terminals.get({ terminalId }),

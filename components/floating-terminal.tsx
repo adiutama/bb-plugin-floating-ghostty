@@ -36,6 +36,7 @@ import {
 import {
   isAlternativeToggle,
   isSwitcherShortcut,
+  isNewTerminalShortcut,
   matchesShortcut,
   type Shortcut,
 } from "../lib/shortcuts";
@@ -693,7 +694,8 @@ export function FloatingTerminal({
             matchesShortcut(event, shortcut, mac),
           ));
       const switcher = open && isSwitcherShortcut(event, mac);
-      if (!toggle && !switcher) return;
+      const newTerminal = open && isNewTerminalShortcut(event, mac);
+      if (!toggle && !switcher && !newTerminal) return;
       // Independent BB dialogs keep their own keyboard handling.
       const foreignDialog = (event.target as Element | null)?.closest?.(
         '[role="dialog"]',
@@ -710,6 +712,10 @@ export function FloatingTerminal({
       if (event.repeat || (!toggle && (loading || resolvedRoute !== routeKey)))
         return;
       if (toggle) windowController.toggle();
+      else if (newTerminal) {
+        if (mode === "switch") rootRef.current?.querySelector<HTMLButtonElement>(".bb-fg-create-session")?.click();
+        else if (mode === "shell") createInContext();
+      }
       else {
         setFindOpen(false);
         setMode((value) => (value === "switch" ? "shell" : "switch"));
@@ -719,10 +725,13 @@ export function FloatingTerminal({
     return () =>
       window.removeEventListener("keydown", onKeyDown, { capture: true });
   }, [
+    mode,
     shortcutEnabled,
     overrideNativeShortcut,
     overrideKeyboard,
     nativeShortcuts,
+    scopes,
+    openTab,
     open,
     loading,
     resolvedRoute,
@@ -740,51 +749,16 @@ export function FloatingTerminal({
 
   // --------------------------------------------------------------- render
 
-  const exitRefresh = useRef<Promise<void> | null>(null);
-  const exitRefreshNeeded = useRef(false);
-  const onExit = useCallback(() => {
-    exitRefreshNeeded.current = true;
-    if (exitRefresh.current) return;
-    const version = requestVersion.current;
-    exitRefresh.current = (async () => {
-      do {
-        exitRefreshNeeded.current = false;
-        const result = await rpc.call("init");
-        dispatch({ type: "synced", snapshot: result.snapshot });
-        if (version !== requestVersion.current) return;
-        if (
-          result.snapshot.tabs.some(
-            (tab) => tab.terminalId === activeIdRef.current,
-          )
-        )
-          continue;
-        const next = preferredTerminal(
-          result.snapshot.tabs,
-          activeOwnerRef.current,
-          undefined,
-          readSelection().recent,
-        );
-        setActiveId(next?.terminalId ?? null);
-        setFindOpen(false);
-        if (next) rememberSelection(contextRef.current, next.terminalId);
-        else windowController.hide();
-      } while (exitRefreshNeeded.current);
-    })()
-      .catch(() => {
-        toast.error("Could not refresh the terminal list.");
-      })
-      .finally(() => {
-        exitRefresh.current = null;
-      });
-  }, [rpc]);
-
   const onStatus = useCallback(
     (terminalId: string, status: TabStatus, detail: string | null) => {
       dispatch({ type: "status", terminalId, status, detail });
-      if (status === "exited") onExit();
     },
-    [onExit],
+    [],
   );
+
+  const onExit = useCallback((terminalId: string, exitCode: number | null) => {
+    onStatus(terminalId, "exited", exitCode === null ? "Shell exited" : `Shell exited with code ${exitCode}`);
+  }, [onStatus]);
 
   const onPumpReady = useCallback((terminalId: string, pump: TerminalPump) => {
     pumps.current.set(terminalId, pump);
@@ -1113,6 +1087,15 @@ export function FloatingTerminal({
                 onPumpGone={onPumpGone}
               />
             ))}
+          {activeTab && mode === "shell" && !findOpen && (activeTab.status === "exited" || activeTab.status === "error") ? (
+            <div className="bb-fg-session-status" role="status">
+              <span>{activeTab.statusDetail ?? (activeTab.status === "exited" ? "Shell exited" : "Connection interrupted. Retrying…")}</span>
+              {activeTab.status === "exited" ? <>
+                <button onClick={() => void restartTab(activeTab.terminalId)}>Start again</button>
+                <button onClick={() => void closeTab(activeTab.terminalId)}>Close</button>
+              </> : null}
+            </div>
+          ) : null}
           {findOpen && activeTab !== null ? (
             <FindBar
               query={findQuery}
@@ -1168,13 +1151,14 @@ export function FloatingTerminal({
               </button>
             </div>
           ) : null}
-          {(mode === "rename" || mode === "delete") && managedTab ? (
+          {(mode === "rename" || mode === "delete" || mode === "restart") && managedTab ? (
             <TerminalManagement
               key={`${mode}:${managedTab.terminalId}`}
               mode={mode}
               tab={managedTab}
               onName={changeName}
               onDelete={() => closeTab(managedTab.terminalId)}
+              onRestart={() => restartTab(managedTab.terminalId)}
               onDismiss={dismissManagement}
             />
           ) : null}
@@ -1203,7 +1187,11 @@ export function FloatingTerminal({
                 setManagedId(id);
                 setMode(nextMode);
               }}
-              onRestart={(id) => void restartTab(id)}
+              onRestart={(id) => {
+                managementReturnMode.current = "switch";
+                setManagedId(id);
+                setMode("restart");
+              }}
               onFind={
                 activeTab
                   ? () => {

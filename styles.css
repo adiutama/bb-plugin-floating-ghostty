@@ -6,36 +6,22 @@
  * of the bb app — including the terminal CSS imported alongside it.
  */
 
-/* Opacity/transform only: terminal geometry stays stable during the transition. */
-.bb-fg-window {
-  transform-origin: 50% 50%;
-}
-
+/* Keep the persistent terminal surface in normal paint flow across hide/show.
+   Animate the backdrop separately; a transformed, paint-contained text grid
+   can retain stale text layers in an embedded browser. */
 .bb-fg-window[data-state="closed"] {
-  opacity: 0;
   pointer-events: none;
-  transform: translate3d(0, 8px, 0) scale(0.985);
-  transition:
-    opacity 130ms cubic-bezier(0.4, 0, 1, 1),
-    transform 130ms cubic-bezier(0.4, 0, 1, 1),
-    visibility 0s linear 130ms;
   visibility: hidden;
 }
 
 .bb-fg-window[data-state="open"] {
-  opacity: 1;
-  transform: translate3d(0, 0, 0) scale(1);
-  transition:
-    opacity 190ms cubic-bezier(0.16, 1, 0.3, 1),
-    transform 190ms cubic-bezier(0.16, 1, 0.3, 1);
   visibility: visible;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .bb-fg-window[data-state="closed"],
-  .bb-fg-window[data-state="open"] {
-    transition: none;
-  }
+.bb-fg-window .term-grid,
+.bb-fg-window .term-row {
+  contain: none;
+  will-change: auto;
 }
 
 /* Let the terminal own the full body box; FitAddon sizes rows/cols to it. */
@@ -62,11 +48,6 @@
   border-radius: 0;
   padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px)
     env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
-  transform-origin: 50% 100%;
-}
-
-.bb-fg-window[data-layout="sheet"][data-state="closed"] {
-  transform: translate3d(0, 16px, 0) scale(0.985);
 }
 
 /* The surroundings return to BB without ending a shell. */
@@ -985,3 +966,47 @@
 @media (prefers-reduced-motion: reduce) {
   .bb-fg-loading-spinner { animation: none; }
 }
+
+/* Wterm 0.5 extends the final cell background across its row and grid.
+   Every cell already paints its own background; unstyled cells inherit ours. */
+.bb-fg-window .wterm .term-row,
+.bb-fg-window .wterm .term-grid,
+[data-renderer="ghostty"] .term-row,
+[data-renderer="ghostty"] .term-grid {
+  background: transparent !important;
+  box-shadow: none !important;
+}
+.bb-fg-selection-snapshot {
+  position: absolute; width: 1px; height: 1px; overflow: hidden;
+  clip-path: inset(50%); white-space: pre; pointer-events: none;
+}
+.bb-fg-select-all .term-row { background: color-mix(in srgb, var(--foreground) 22%, transparent) !important; }
+.bb-fg-session-status {
+  position: absolute; bottom: 8px; left: 8px; right: 8px;
+  display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: var(--background); color: var(--foreground); font-size: 12px;
+}
+.bb-fg-session-status span { flex: 1; }
+.bb-fg-session-status button { text-decoration: underline; }
+
+.wterm[data-cursor-shape="bar"] .term-cursor,
+.wterm[data-cursor-shape="underline"] .term-cursor {
+  background: var(--term-cell-bg, transparent) !important;
+  color: var(--term-cell-fg, var(--term-fg)) !important;
+  outline: none;
+  animation: none !important;
+  position: relative;
+}
+.wterm[data-cursor-shape="bar"] .term-cursor::after,
+.wterm[data-cursor-shape="underline"] .term-cursor::after {
+  content: ""; position: absolute; background: var(--term-cursor);
+  pointer-events: none; left: 0; bottom: 0;
+}
+.wterm[data-cursor-shape="bar"] .term-cursor::after { width: 2px; height: 100%; }
+.wterm[data-cursor-shape="underline"] .term-cursor::after { width: 100%; height: 2px; }
+.wterm.focused.cursor-blink[data-cursor-shape="bar"] .term-cursor::after,
+.wterm.focused.cursor-blink[data-cursor-shape="underline"] .term-cursor::after {
+  animation: bb-fg-cursor-blink 1s step-end infinite;
+}
+@keyframes bb-fg-cursor-blink { 50% { opacity: 0; } }

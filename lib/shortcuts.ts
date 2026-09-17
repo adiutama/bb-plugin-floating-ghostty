@@ -48,3 +48,9 @@ export function isSwitcherShortcut(
     mac,
   );
 }
+
+export function isNewTerminalShortcut(event: KeyboardEvent, mac: boolean): boolean {
+  return matchesShortcut(event, {
+    key: "n", mod: true, meta: false, control: false, alt: false, shift: false,
+  }, mac);
+}

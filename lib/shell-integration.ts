@@ -15,14 +15,16 @@ ZDOTDIR="$__bb_fg_dir"
 
 const ZSH_RC = `ZDOTDIR="$BB_FLOATING_GHOSTTY_ZDOTDIR"
 [[ -r "$ZDOTDIR/.zshrc" ]] && source "$ZDOTDIR/.zshrc"
-if [[ -n "$BB_FLOATING_GHOSTTY_ENV_FILE" && -r "$BB_FLOATING_GHOSTTY_ENV_FILE" ]]; then
-  source "$BB_FLOATING_GHOSTTY_ENV_FILE"
-  command rm -f -- "$BB_FLOATING_GHOSTTY_ENV_FILE"
-  command rmdir -- "\${BB_FLOATING_GHOSTTY_ENV_FILE%/*}" 2>/dev/null
-fi
+__bb_fg_environment() {
+  setopt localoptions shwordsplit
+  if [[ -n "$BB_FLOATING_GHOSTTY_ENV_FILE" && -r "$BB_FLOATING_GHOSTTY_ENV_FILE" ]]; then
+    source "$BB_FLOATING_GHOSTTY_ENV_FILE"
+  fi
+}
+__bb_fg_environment
 command rm -f -- "$__bb_fg_dir/.zshenv" "$__bb_fg_dir/.zprofile" "$__bb_fg_dir/.zshrc"
 command rmdir -- "$__bb_fg_dir" 2>/dev/null
-unset __bb_fg_dir BB_FLOATING_GHOSTTY_ZDOTDIR BB_FLOATING_GHOSTTY_ENV_FILE
+unset __bb_fg_dir BB_FLOATING_GHOSTTY_ZDOTDIR
 autoload -Uz add-zsh-hook
 __bb_fg_prompt() { builtin printf '\\033]1337;CurrentDir=%s\\007' "$PWD"; builtin printf '\\033]0;bb-fg:shell:zsh\\007'; }
 __bb_fg_preexec() {
@@ -35,6 +37,7 @@ __bb_fg_preexec() {
     break
   done
 }
+add-zsh-hook precmd __bb_fg_environment
 add-zsh-hook precmd __bb_fg_prompt
 add-zsh-hook preexec __bb_fg_preexec
 `;
@@ -46,14 +49,15 @@ elif [[ -r ~/.bash_login ]]; then source ~/.bash_login
 elif [[ -r ~/.profile ]]; then source ~/.profile
 elif [[ -r ~/.bashrc ]]; then source ~/.bashrc
 fi
-if [[ -n "$BB_FLOATING_GHOSTTY_ENV_FILE" && -r "$BB_FLOATING_GHOSTTY_ENV_FILE" ]]; then
-  source "$BB_FLOATING_GHOSTTY_ENV_FILE"
-  command rm -f -- "$BB_FLOATING_GHOSTTY_ENV_FILE"
-  command rmdir -- "\${BB_FLOATING_GHOSTTY_ENV_FILE%/*}" 2>/dev/null
-fi
+__bb_fg_environment() {
+  if [[ -n "$BB_FLOATING_GHOSTTY_ENV_FILE" && -r "$BB_FLOATING_GHOSTTY_ENV_FILE" ]]; then
+    source "$BB_FLOATING_GHOSTTY_ENV_FILE"
+  fi
+}
+__bb_fg_environment
 command rm -f -- "$BB_FLOATING_GHOSTTY_RC"
-unset BB_FLOATING_GHOSTTY_RC BB_FLOATING_GHOSTTY_ENV_FILE
-__bb_fg_prompt() { local result=$?; builtin printf '\\033]1337;CurrentDir=%s\\007' "$PWD"; builtin printf '\\033]0;bb-fg:shell:bash\\007'; return "$result"; }
+unset BB_FLOATING_GHOSTTY_RC
+__bb_fg_prompt() { local result=$?; __bb_fg_environment; builtin printf '\\033]1337;CurrentDir=%s\\007' "$PWD"; builtin printf '\\033]0;bb-fg:shell:bash\\007'; return "$result"; }
 __bb_fg_preexec() {
   [[ "$BASH_COMMAND" == __bb_fg_* ]] && return
   local -a words
@@ -76,12 +80,15 @@ fi
 
 // Fish emits its title after fish_prompt/preexec events. Use its title function
 // so a later default directory title cannot overwrite the integration signal.
-const FISH_INIT = `if test -n "$BB_FLOATING_GHOSTTY_ENV_FILE"; and test -r "$BB_FLOATING_GHOSTTY_ENV_FILE"
-  source "$BB_FLOATING_GHOSTTY_ENV_FILE"
-  command rm -f -- "$BB_FLOATING_GHOSTTY_ENV_FILE"
-  command rmdir -- (string replace -r '/[^/]+$' '' "$BB_FLOATING_GHOSTTY_ENV_FILE") 2>/dev/null
+const FISH_INIT = `if set -q BB_FLOATING_GHOSTTY_ENV_FILE; and test -n "$BB_FLOATING_GHOSTTY_ENV_FILE"
+  set -gx BB_FLOATING_GHOSTTY_ENV_FILE "$BB_FLOATING_GHOSTTY_ENV_FILE.fish"
 end
-set -e BB_FLOATING_GHOSTTY_ENV_FILE
+function __bb_fg_environment --on-event fish_prompt
+  if test -n "$BB_FLOATING_GHOSTTY_ENV_FILE"; and test -r "$BB_FLOATING_GHOSTTY_ENV_FILE"
+    source "$BB_FLOATING_GHOSTTY_ENV_FILE"
+  end
+end
+__bb_fg_environment
 function __bb_fg_directory --on-event fish_prompt
   printf '\\033]1337;CurrentDir=%s\\007' "$PWD"
 end
@@ -130,8 +137,6 @@ const SHELL_START_SCRIPT = [
   "*)",
   'if [ -n "$BB_FLOATING_GHOSTTY_ENV_FILE" ] && [ -r "$BB_FLOATING_GHOSTTY_ENV_FILE" ]; then',
   '. "$BB_FLOATING_GHOSTTY_ENV_FILE"',
-  'command rm -f -- "$BB_FLOATING_GHOSTTY_ENV_FILE"',
-  'command rmdir -- "${BB_FLOATING_GHOSTTY_ENV_FILE%/*}" 2>/dev/null',
   "unset BB_FLOATING_GHOSTTY_ENV_FILE",
   "fi",
   'exec "$bb_fg_shell"',

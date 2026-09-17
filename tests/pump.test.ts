@@ -33,6 +33,7 @@ beforeAll(async () => {
   assets.url = `data:application/wasm;base64,${bytes.toString("base64")}`;
 });
 beforeEach(() => {
+  vi.spyOn(navigator, "platform", "get").mockReturnValue("MacIntel");
   vi.stubGlobal(
     "ResizeObserver",
     class {
@@ -567,5 +568,144 @@ it("reads fresh echo immediately after a pre-input read finishes", async () => {
     release();
     pump.dispose();
     vi.useRealTimers();
+  }
+});
+
+it("answers startup queries in the first attachment so the shell can draw its prompt", async () => {
+  let answered = false;
+  const call = vi.fn(async (method: string, input: Record<string, unknown>) => {
+    if (method === "write") { answered = true; return { ok: true }; }
+    if (method === "read") return {
+      ...output(input.replay ? "\x1b[6n" : answered ? "fish> " : ""),
+      respondToQueries: input.replay === true,
+    };
+    return { ok: true };
+  });
+  const { container } = createPump(call);
+  await vi.waitFor(() => expect(container.textContent).toContain("fish> "));
+});
+
+import { GhosttyCore } from "@wterm/ghostty";
+import { searchTerminal } from "../lib/search";
+const fixture = (text: string) => createPump(vi.fn(async (method: string, input: Record<string, unknown>) => method === "read" ? output(input.replay ? text : "") : { ok: true }));
+const sent = (call: ReturnType<typeof vi.fn>) => call.mock.calls.filter(([method]) => method === "write").map(([, input]) => atob(input.dataBase64)).join("");
+
+it("polish: last-column styling stays within its cell", async () => {
+  const { container } = fixture("a".repeat(79) + "\x1b[41m ");
+  await vi.waitFor(() => expect(container.textContent).toContain("a".repeat(79)));
+  const style = document.createElement("style"); style.textContent = await readFile("styles.css", "utf8"); container.append(style);
+  const row = container.querySelector<HTMLElement>(".term-row")!;
+
+  // jsdom does not implement stylesheet !important over inline styles.
+  // Verify the matching override and that the cell keeps its explicit color.
+  const rules = Array.from(style.sheet!.cssRules).filter((rule): rule is CSSStyleRule => "selectorText" in rule);
+  expect(rules.some(rule => row.matches(rule.selectorText) && rule.style.getPropertyValue("background") === "transparent" && rule.style.getPropertyPriority("background") === "important")).toBe(true);
+  expect(row.lastElementChild?.getAttribute("style")).toContain("rgb(204,102,102)");
+});
+it("polish: physical Ctrl+F reaches the PTY on macOS", async () => {
+  const { container, call } = fixture("ready");
+  await vi.waitFor(() => expect(container.textContent).toContain("ready"));
+  fireEvent.keyDown(container.querySelector("textarea")!, { key: "f", code: "KeyF", ctrlKey: true });
+  await new Promise(r => setTimeout(r, 30));
+  expect(sent(call)).toBe("\x06");
+});
+it("polish: Cmd+Left goes to line start and Ctrl+Left keeps its modifier", async () => {
+  const { container, call } = fixture("ready");
+  await vi.waitFor(() => expect(container.textContent).toContain("ready"));
+  const input = container.querySelector("textarea")!;
+  fireEvent.keyDown(input, { key: "ArrowLeft", metaKey: true });
+  fireEvent.keyDown(input, { key: "ArrowLeft", ctrlKey: true });
+  await vi.waitFor(() => expect(sent(call)).toBe("\x01\x1b[1;5D"));
+});
+it("polish: Cmd+A selects all retained history", async () => {
+  const { container } = fixture(Array.from({length: 1000}, (_, i) => `line${i.toString().padStart(4,"0")}\r\n`).join(""));
+  await vi.waitFor(() => expect(container.textContent).toContain("line0999"));
+  fireEvent.keyDown(container.querySelector("textarea")!, { key: "a", metaKey: true });
+  const text = window.getSelection()!.toString();
+  expect(text).toContain("line0999");
+  expect(text).toContain("line0000");
+  expect((text.match(/line[0-9]{4}/g) ?? []).length).toBe(1000);
+});
+it("polish: toolbar send and physical typing both return to newest output", async () => {
+  const { pump, container } = fixture("ready");
+  await vi.waitFor(() => expect(container.textContent).toContain("ready"));
+  let top = 0;
+  Object.defineProperties(container, { scrollHeight: {value:1600}, scrollTop:{ get:()=>top, set:(value:number)=>{top=Math.min(value,1216);} } });
+  fireEvent.scroll(container);
+  pump.send("x");
+  expect(top).toBe(1216);
+  fireEvent.keyDown(container.querySelector("textarea")!, {key:"y"});
+  expect(top).toBe(1216);
+});
+it("polish: search includes the newest matches beyond 1000 results", async () => {
+  const core = await GhosttyCore.load({wasmPath:assets.url,scrollbackLimit:1024*1024});
+  try {
+    core.init(20, 24); core.writeString("error\r\n".repeat(1100));
+    const matches = searchTerminal(core,"error");
+    expect(matches).toHaveLength(1100);
+    expect(matches.at(-1)!.row).toBe(1099);
+    expect(core.getScrollbackCount()+core.getRows()).toBeGreaterThan(1100);
+  } finally {core.dispose();}
+});
+it("polish: terminal input is labelled and remains within the viewport", async () => {
+  const { container } = fixture("ready");
+  await vi.waitFor(() => expect(container.textContent).toContain("ready"));
+  const input = container.querySelector("textarea")!;
+  expect(input.getAttribute("aria-hidden")).toBeNull();
+  expect(input.style.left).not.toBe("-9999px");
+  expect(container.querySelector('[role="log"], [aria-live]')).toBeNull();
+});
+
+it("answers real Ghostty color queries using the current host theme", async () => {
+  let light = false;
+  const computed = window.getComputedStyle.bind(window);
+  vi.spyOn(window, "getComputedStyle").mockImplementation((element) => {
+    const result = computed(element);
+    const color = (element as HTMLElement).style.color;
+    if (color === "var(--foreground)" || color === "var(--background)") {
+      const foreground = color === "var(--foreground)";
+      return new Proxy(result, { get(target, property) {
+        if (property === "color") return foreground === light ? "rgb(0, 0, 0)" : "rgb(255, 255, 255)";
+        return Reflect.get(target, property);
+      } });
+    }
+    return result;
+  });
+  let revision = 0;
+  const call = vi.fn(async (method: string, input: Record<string, unknown>) =>
+    method === "read" ? {
+      ...output(revision === 0 || light && revision === 1 ? "ready\x1b]10;?\x07\x1b]11;?\x07" : "", ++revision),
+      respondToQueries: true,
+    } : { ok: true },
+  );
+  const { pump } = createPump(call);
+  await vi.waitFor(() => expect(sent(call)).toContain("\x1b]11;rgb:0000/0000/0000"));
+  light = true;
+  pump.refreshTheme();
+  revision = 1;
+  await vi.waitFor(() => expect(sent(call)).toContain("\x1b]11;rgb:ffff/ffff/ffff"));
+});
+
+it("keeps an idle prompt visible after changing terminal dimensions", async () => {
+  const { pump, container } = fixture("~\r\nprompt> ");
+  await vi.waitFor(() => expect(container.textContent).toContain("prompt>"));
+  vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function(this: HTMLElement) {
+    const width = this.tagName === "SPAN" ? (this.textContent?.length ?? 1) * 7 : 640;
+    return { width, height: 16, x: 0, y: 0, top: 0, left: 0, right: width, bottom: 16, toJSON() {} };
+  });
+  pump.fit();
+  await new Promise(resolve => setTimeout(resolve, 50));
+  expect(container.textContent).toContain("prompt>");
+});
+
+it("keeps idle prompt cells through row-only resizing", async () => {
+  const { pump, container } = fixture("directory\r\nprompt> ");
+  await vi.waitFor(() => expect(container.textContent).toContain("prompt>"));
+  for (const rows of [30, 20, 24, 40, 24]) {
+    (pump as any).fitting = true;
+    (pump as any).terminal.resize(80, rows);
+    (pump as any).fitting = false;
+    await new Promise(resolve => setTimeout(resolve, 30));
+    expect(container.textContent, `rows ${rows}`).toContain("prompt>");
   }
 });

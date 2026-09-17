@@ -68,6 +68,7 @@ export function ProjectEnvironmentManagement({
           ? `Cleared environment for ${projectLabel}`
           : `Saved ${result.keyCount} variable${result.keyCount === 1 ? "" : "s"} for ${projectLabel}`,
       );
+      if (result.pendingHosts) toast.warning("Saved, but some terminal hosts could not be updated. They will retry automatically when their terminals reconnect.");
       onDismiss();
     } catch (error) {
       setError(
@@ -139,7 +140,7 @@ export function ProjectEnvironmentManagement({
               onChange={(event) => setText(event.target.value)}
             />
             <p className="bb-fg-management-note">
-              Applied to new and restarted shells in every worktree for this
+              Applied at the next prompt in every worktree for this
               project.
             </p>
             <div className="bb-fg-management-actions">

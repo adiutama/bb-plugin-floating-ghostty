@@ -39,7 +39,7 @@ export default definePluginApp((app) => {
     id: "project-environments",
     title: "Project environments",
     description:
-      "Browse and edit the environment variables applied to new and restarted Floating Ghostty shells.",
+      "Browse and edit the environment variables applied at the next prompt in Floating Ghostty shells.",
     component: ProjectEnvironmentSettingsSection,
   });
   app.slots.sidebarFooterAction({
