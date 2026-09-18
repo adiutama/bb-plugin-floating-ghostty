@@ -7,24 +7,33 @@ Open it from the ghost in the sidebar footer or **Ctrl+backtick** and type direc
 into a shell. Press the same shortcut or the **×** to return to BB. Your shells
 keep running, and surviving sessions reattach on reload.
 
-The minimal header shows the ghost, terminal selector, and hide control. All
-session management lives in the selector. Managing a background session keeps
+The minimal header shows the sidebar toggle, ghost, terminal name and path, and
+hide control. Search and session management live in an attached left sidebar. Managing a background session keeps
 your current shell selected, and dialogs return to the same search and filter.
 
-Terminals belong to a project or **No project**. **Cmd/Ctrl+K** opens a flat,
-searchable list that defaults to the current thread's project. The project filter
-sits beside search; **Cmd/Ctrl+P** opens it, and **All** shows terminals across
-every project. Compact rows show the shell title above its working directory. The project picker is searchable.
-**New terminal** appears in the results when search is empty and creates in the
-selected project (the current BB context under All). Worktrees determine the
-launch directory; project ownership stays fixed. Each session’s **⋯** menu lets
-you rename, restart, or delete it. Project terminals also expose a dotenv editor
-whose values are injected into new and restarted shells across that project's
-worktrees. The plugin Settings page also provides a searchable inventory
-of configured projects and opens the same editor without requiring a running
-terminal. Names automatically follow the shell and
-running command unless you pin a custom name. Exited shells disappear automatically;
-the window selects another shell in the same project or closes if none remain.
+Terminals belong to their launch worktree. Opening the terminal shows an existing
+shell for the current thread’s worktree, or creates one if none exists. Each
+worktree remembers its own selection. Threads without a worktree use the default
+checkout; projectless threads use a machine’s home directory.
+
+**Cmd/Ctrl+K** toggles a compact sidebar beside the shell. Its search and terminal
+list use BB’s muted surfaces and flat rows. The sidebar stays open after selecting
+a shell on desktop; narrow layouts return to the shell. The project filter groups sessions
+for browsing; it does not share terminals between worktrees. **Cmd/Ctrl+P** opens
+the filter, and **All** shows terminals across projects. **New terminal** creates
+an additional shell in the selected context. Environment variables are accessible
+from the sidebar footer. Each session’s **⋯** menu lets you
+rename, restart, delete, or edit its environment variables.
+
+Each worktree has independent environment variables, applied at the next prompt.
+Settings lists projects and worktrees, including empty environments. **Copy to…**
+lets you choose another project or worktree and review the variables before saving.
+Copies are independent. Names follow the shell and running command unless pinned.
+Exited shells close silently; the window selects another live shell in the current
+worktree or hides if none remain. Disconnected shells stay available for reconnection.
+
+See the [worktree ownership contract](README.md#worktree-ownership-contract) for
+implementation invariants and regression tests.
 
 The centered window remembers its position, supports maximize and restore, and
 becomes fullscreen on smaller screens, adjusting for the software keyboard.

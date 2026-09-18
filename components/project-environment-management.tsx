@@ -10,13 +10,22 @@ export function ProjectEnvironmentManagement({
   rpc,
   projectId,
   projectLabel,
+  environmentId,
+  initialText,
   onDismiss,
 }: {
   rpc: PluginRpcClient<typeof rpcContract>;
   projectId: string;
   projectLabel: string;
+  environmentId?: string;
+  initialText?: string;
   onDismiss: () => void;
 }) {
+  const [targets, setTargets] = useState<{ id: string; projectId?: string; environmentId?: string; name: string }[]>([]);
+  const [destination, setDestination] = useState("");
+  const [copyTarget, setCopyTarget] = useState<(typeof targets)[number] | null>(null);
+  const [choosingCopy, setChoosingCopy] = useState(false);
+  const [loadFailed, setLoadFailed] = useState(false);
   const [text, setText] = useState("");
   const [revision, setRevision] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -26,11 +35,13 @@ export function ProjectEnvironmentManagement({
 
   useEffect(() => {
     let active = true;
+    setLoading(true);
+    setLoadFailed(false);
     void rpc
-      .call("getProjectEnvironment", { projectId })
+      .call("getProjectEnvironment", { projectId, ...(environmentId ? { environmentId } : {}) })
       .then((environment) => {
         if (!active) return;
-        setText(environment.text);
+        setText(initialText ?? environment.text);
         setRevision(environment.revision);
         setLoading(false);
         requestAnimationFrame(() => {
@@ -41,6 +52,7 @@ export function ProjectEnvironmentManagement({
       })
       .catch((error) => {
         if (!active) return;
+        setLoadFailed(true);
         setError(
           error instanceof Error
             ? error.message
@@ -51,15 +63,16 @@ export function ProjectEnvironmentManagement({
     return () => {
       active = false;
     };
-  }, [projectId, rpc]);
+  }, [projectId, environmentId, initialText, rpc]);
 
   const save = async () => {
-    if (busy || loading) return;
+    if (busy || loading || loadFailed) return;
     setBusy(true);
     setError(null);
     try {
       const result = await rpc.call("saveProjectEnvironment", {
         projectId,
+        ...(environmentId ? { environmentId } : {}),
         text,
         expectedRevision: revision,
       });
@@ -81,6 +94,26 @@ export function ProjectEnvironmentManagement({
     }
   };
 
+  const chooseCopy = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await rpc.call("listProjectEnvironments", { includeUnconfigured: true });
+      setTargets(result.projects.filter((target) =>
+        (target.projectId ?? target.id) !== projectId || target.environmentId !== environmentId));
+      setChoosingCopy(true);
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "Could not load destinations.");
+    } finally { setBusy(false); }
+  };
+
+  if (copyTarget) return <ProjectEnvironmentManagement
+    key={copyTarget.id} rpc={rpc}
+    projectId={copyTarget.projectId ?? copyTarget.id}
+    environmentId={copyTarget.environmentId} projectLabel={copyTarget.name}
+    initialText={text} onDismiss={() => setCopyTarget(null)}
+  />;
+
   return (
     <div
       className="bb-fg-switcher-scrim bb-fg-management-scrim"
@@ -92,7 +125,7 @@ export function ProjectEnvironmentManagement({
         ref={dialog}
         className="bb-fg-switcher bb-fg-management bb-fg-environment"
         role="dialog"
-        aria-label="Project environment"
+        aria-label="Environment variables"
         onPointerDown={(event) => event.stopPropagation()}
         onKeyDown={(event) => {
           containTab(event);
@@ -104,7 +137,7 @@ export function ProjectEnvironmentManagement({
         }}
       >
         <div className="bb-fg-management-heading">
-          <span>Project environment</span>
+          <span>Environment variables</span>
           <button aria-label="Cancel" disabled={busy} onClick={onDismiss}>
             <Icon name="X" className="size-4" />
           </button>
@@ -126,6 +159,7 @@ export function ProjectEnvironmentManagement({
             >
               {projectLabel}
             </label>
+            {initialText !== undefined ? <p className="bb-fg-management-note">Review the copied variables below. Saving replaces the destination’s variables.</p> : null}
             <textarea
               id="bb-fg-project-environment"
               data-initial-focus=""
@@ -136,14 +170,29 @@ export function ProjectEnvironmentManagement({
               autoCapitalize="off"
               autoComplete="off"
               spellCheck={false}
-              disabled={busy}
+              disabled={busy || loadFailed}
               onChange={(event) => setText(event.target.value)}
             />
             <p className="bb-fg-management-note">
-              Applied at the next prompt in every worktree for this
-              project.
+              Applied at the next prompt only in this {environmentId ? "worktree" : "project’s default checkout"}.
+              Copies are independent.
             </p>
+            {choosingCopy ? <div className="bb-fg-environment-copy-panel">
+              <label htmlFor="bb-fg-copy-destination">Copy to project or worktree</label>
+              <select id="bb-fg-copy-destination" value={destination} disabled={busy}
+                onChange={(event) => setDestination(event.target.value)}>
+                <option value="">Choose destination…</option>
+                {targets.map((target) => <option key={target.id} value={target.id}>
+                  {target.name}{target.environmentId ? " · Worktree" : " · Default checkout"}
+                </option>)}
+              </select>
+              <p className="bb-fg-management-note">Review the destination before saving. Its existing variables will be replaced.</p>
+              <button type="button" disabled={!destination || busy} onClick={() => {
+                setCopyTarget(targets.find((target) => target.id === destination) ?? null);
+              }}>Review copy</button>
+            </div> : null}
             <div className="bb-fg-management-actions">
+              <button type="button" disabled={busy || loadFailed || !text} onClick={() => void chooseCopy()}>Copy to…</button>
               <button
                 type="button"
                 onClick={() => setText("")}
@@ -155,7 +204,7 @@ export function ProjectEnvironmentManagement({
               <button type="button" onClick={onDismiss} disabled={busy}>
                 Cancel
               </button>
-              <button type="submit" className="bb-fg-primary" disabled={busy}>
+              <button type="submit" className="bb-fg-primary" disabled={busy || loadFailed}>
                 {busy ? "Saving…" : "Save"}
               </button>
             </div>

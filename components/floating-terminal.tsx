@@ -15,7 +15,7 @@ import { Icon } from "@/components/ui/icon";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { useMediaQuery } from "./ui/hooks/use-media-query";
 import { useIsCompactViewport } from "@/components/ui/hooks/use-compact-viewport";
-import { TerminalSwitcher } from "./terminal-switcher";
+import { TerminalSidebar } from "./terminal-sidebar";
 import { TerminalManagement, type ManagementMode } from "./terminal-management";
 import { TerminalHeader } from "./terminal-header";
 import { ProjectEnvironmentManagement } from "./project-environment-management";
@@ -127,6 +127,7 @@ export function FloatingTerminal({
   const [mode, setMode] = useState<"shell" | "switch" | ManagementMode>(
     "shell",
   );
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [managedId, setManagedId] = useState<string | null>(null);
   const managementReturnMode = useRef<"shell" | "switch">("switch");
   const [loading, setLoading] = useState(false);
@@ -248,16 +249,6 @@ export function FloatingTerminal({
   // size, and briefly mis-wraps until the first resize lands.
   const activeIdRef = useRef<string | null>(null);
   activeIdRef.current = activeId;
-  // Keep the selected shell's owner through the snapshot that removes it.
-  const activeOwnerRef = useRef<TerminalContext>(globalContext);
-  const selectedShell = state.tabs.find((tab) => tab.terminalId === activeId);
-  if (selectedShell) {
-    activeOwnerRef.current = {
-      ...globalContext,
-      projectId: ownerOf(selectedShell.scopeKey).projectId,
-    };
-  }
-
   const geometry = useCallback(() => {
     const activeId = activeIdRef.current;
     const pump = activeId === null ? null : pumps.current.get(activeId);
@@ -317,6 +308,7 @@ export function FloatingTerminal({
         if (!launch) {
           launch = rpc.call("openTab", {
             scopeKey: destination.key,
+            reuseExisting: true,
             ...geometry(),
           });
           pendingLaunches.current.set(destination.key, launch);
@@ -340,6 +332,11 @@ export function FloatingTerminal({
     }
   }, [rpc, geometry]);
 
+  const collapseSidebarForShell = useCallback(() => {
+    const width = rootRef.current?.getBoundingClientRect().width || frameRef.current.width;
+    if (sheetRef.current || width <= 600) setSidebarOpen(false);
+  }, []);
+
   const openTab = useCallback(
     async (scopeKey: string) => {
       if (creatingRef.current) return;
@@ -360,8 +357,9 @@ export function FloatingTerminal({
         dispatch({ type: "synced", snapshot: result.snapshot });
         if (version !== requestVersion.current) return;
         setActiveId(result.opened.terminalId);
-        rememberSelection(context, result.opened.terminalId);
+        rememberSelection({ ...context, ...ownerOf(result.opened.scopeKey) }, result.opened.terminalId);
         setMode("shell");
+        collapseSidebarForShell();
         setLoadError(null);
       } catch (error) {
         toast.error(
@@ -372,7 +370,7 @@ export function FloatingTerminal({
         setCreating(false);
       }
     },
-    [rpc, geometry],
+    [rpc, geometry, collapseSidebarForShell],
   );
 
   const createInContext = (projectId = contextRef.current.projectId) => {
@@ -394,6 +392,12 @@ export function FloatingTerminal({
     void openTab(scope.key);
   };
 
+  const toggleSidebar = useCallback(() => {
+    setFindOpen(false);
+    setSidebarOpen(!sidebarOpen);
+    setMode(sidebarOpen ? "shell" : "switch");
+  }, [sidebarOpen]);
+
   const changeName = async (name: string | null) => {
     if (!managedId) return;
     const result = await rpc.call("setTabName", {
@@ -410,7 +414,7 @@ export function FloatingTerminal({
       if (activeIdRef.current === terminalId) {
         const memory = readSelection();
         const next = preferredTerminal(
-          result.snapshot.tabs,
+          result.snapshot.tabs.filter((tab) => tab.status === "running" || tab.status === "starting"),
           contextRef.current,
           undefined,
           memory.recent,
@@ -422,6 +426,18 @@ export function FloatingTerminal({
     },
     [rpc],
   );
+
+  const closingExited = useRef(new Set<string>());
+  useEffect(() => {
+    for (const tab of state.tabs) {
+      if (tab.status !== "exited" || closingExited.current.has(tab.terminalId) || restarting.current.has(tab.terminalId)) continue;
+      closingExited.current.add(tab.terminalId);
+      void closeTab(tab.terminalId)
+        // Retain ownership on a host failure; the next snapshot can retry.
+        .catch(() => {})
+        .finally(() => closingExited.current.delete(tab.terminalId));
+    }
+  }, [state.tabs, closeTab]);
 
   const restartTab = useCallback(
     async (terminalId: string) => {
@@ -446,7 +462,7 @@ export function FloatingTerminal({
           activeIdRef.current === terminalId
         ) {
           setActiveId(result.restarted.terminalId);
-          rememberSelection(contextRef.current, result.restarted.terminalId);
+          rememberSelection({ ...contextRef.current, ...ownerOf(result.restarted.scopeKey) }, result.restarted.terminalId);
         }
       } catch (error) {
         toast.error(
@@ -477,8 +493,9 @@ export function FloatingTerminal({
       const tab = state.tabs.find((tab) => tab.terminalId === terminalId);
       if (!tab) return;
       setActiveId(terminalId);
-      rememberSelection(contextRef.current, terminalId);
+      rememberSelection({ ...contextRef.current, ...ownerOf(tab.scopeKey) }, terminalId);
       setMode("shell");
+      collapseSidebarForShell();
       window.requestAnimationFrame(() =>
         pumps.current.get(terminalId)?.focus(),
       );
@@ -487,7 +504,7 @@ export function FloatingTerminal({
         // Persistence only; the client already switched.
       });
     },
-    [rpc, state.tabs],
+    [rpc, state.tabs, collapseSidebarForShell],
   );
 
   // ----------------------------------------------------------------- init
@@ -509,13 +526,14 @@ export function FloatingTerminal({
   useEffect(() => {
     if (!open) {
       requestVersion.current++;
+      collapseSidebarForShell();
       setMode("shell");
       setManagedId(null);
       setFindOpen(false);
       return;
     }
     void sync();
-  }, [open, sync]);
+  }, [open, sync, collapseSidebarForShell]);
 
   // Navigation returns attention to BB, but never terminates a shell.
   const previousRoute = useRef(`${selection.projectId}:${selection.threadId}`);
@@ -713,12 +731,11 @@ export function FloatingTerminal({
         return;
       if (toggle) windowController.toggle();
       else if (newTerminal) {
-        if (mode === "switch") rootRef.current?.querySelector<HTMLButtonElement>(".bb-fg-create-session")?.click();
+        if (sidebarOpen && (event.target as Element | null)?.closest?.(".bb-fg-terminal-sidebar")) rootRef.current?.querySelector<HTMLButtonElement>(".bb-fg-create-session")?.click();
         else if (mode === "shell") createInContext();
       }
       else {
-        setFindOpen(false);
-        setMode((value) => (value === "switch" ? "shell" : "switch"));
+        toggleSidebar();
       }
     };
     window.addEventListener("keydown", onKeyDown, { capture: true });
@@ -736,6 +753,8 @@ export function FloatingTerminal({
     loading,
     resolvedRoute,
     routeKey,
+    toggleSidebar,
+    sidebarOpen,
   ]);
 
   useEffect(() => {
@@ -851,8 +870,9 @@ export function FloatingTerminal({
 
   const openFind = useCallback(() => {
     if (activePump()?.searchAvailable() !== true) return;
+    collapseSidebarForShell();
     setFindOpen(true);
-  }, [activePump]);
+  }, [activePump, collapseSidebarForShell]);
 
   const closeFind = useCallback(() => {
     setFindOpen(false);
@@ -974,7 +994,7 @@ export function FloatingTerminal({
     availableTabs
       .filter((tab) => tab.terminalId !== activeId)
       .map((tab) => tab.terminalId),
-    open && !loading && mode === "switch",
+    open && !loading && sidebarOpen,
     onTitle,
     onCwd,
     onExit,
@@ -982,7 +1002,7 @@ export function FloatingTerminal({
   const visited = useRef(new Set<string>());
   if (activeTab && !loading) visited.current.add(activeTab.terminalId);
   const managedTab = availableTabs.find((tab) => tab.terminalId === managedId);
-  const dismissPicker = () => setMode("shell");
+  const dismissPicker = () => { setSidebarOpen(false); setMode("shell"); };
   const dismissManagement = () => setMode(managementReturnMode.current);
 
   if (!mounted) return null;
@@ -1030,31 +1050,59 @@ export function FloatingTerminal({
         >
           <TerminalHeader
             tab={activeTab}
-            onSwitch={() => {
-              setFindOpen(false);
-              setMode((value) => (value === "switch" ? "shell" : "switch"));
-            }}
-            onEnvironment={
-              activeTab && ownerOf(activeTab.scopeKey).projectId
-                ? () => {
-                    if (mode === "environment") {
-                      setMode("shell");
-                      return;
-                    }
-                    managementReturnMode.current = "shell";
-                    setManagedId(activeTab.terminalId);
-                    setMode("environment");
-                  }
-                : undefined
-            }
+            onSwitch={toggleSidebar}
             onHide={hide}
             busy={loading || creating}
-            expanded={mode === "switch"}
-            environmentOpen={mode === "environment"}
+            expanded={sidebarOpen}
           />
         </div>
 
-        <div className="bb-fg-terminal-body relative min-h-0 flex-1" aria-busy={terminalLoading}>
+        <div className="bb-fg-workspace">
+          {sidebarOpen ? <TerminalSidebar
+              tabs={availableTabs}
+              scopes={scopes}
+              context={terminalContext}
+              activeId={activeId}
+              visible={open && sidebarOpen}
+              focusSearch={mode === "switch"}
+              onEnvironment={activeTab && ownerOf(activeTab.scopeKey).projectId ? () => {
+                managementReturnMode.current = "switch";
+                setManagedId(activeTab.terminalId);
+                setMode("environment");
+              } : undefined}
+              busy={loading || creating}
+              onCreate={createInContext}
+              onManage={(id, nextMode) => {
+                managementReturnMode.current = "switch";
+                setManagedId(id);
+                setMode(nextMode);
+              }}
+              onRestart={(id) => {
+                managementReturnMode.current = "switch";
+                setManagedId(id);
+                setMode("restart");
+              }}
+              onFind={
+                activeTab
+                  ? () => {
+                      setMode("shell");
+                      openFind();
+                    }
+                  : undefined
+              }
+              maximize={
+                sheet
+                  ? null
+                  : {
+                      on: maximized,
+                      toggle: () => setMaximized((value) => !value),
+                    }
+              }
+              onSelect={selectTab}
+              onDismiss={dismissPicker}
+            /> : null}
+        <div className="bb-fg-terminal-body relative min-h-0 flex-1" aria-busy={terminalLoading}
+          onPointerDown={() => { if (mode === "switch") setMode("shell"); }}>
           {state.tabs
             .filter((tab) => visited.current.has(tab.terminalId))
             .map((tab) => (
@@ -1087,13 +1135,9 @@ export function FloatingTerminal({
                 onPumpGone={onPumpGone}
               />
             ))}
-          {activeTab && mode === "shell" && !findOpen && (activeTab.status === "exited" || activeTab.status === "error") ? (
+          {activeTab && mode === "shell" && !findOpen && activeTab.status === "error" ? (
             <div className="bb-fg-session-status" role="status">
-              <span>{activeTab.statusDetail ?? (activeTab.status === "exited" ? "Shell exited" : "Connection interrupted. Retrying…")}</span>
-              {activeTab.status === "exited" ? <>
-                <button onClick={() => void restartTab(activeTab.terminalId)}>Start again</button>
-                <button onClick={() => void closeTab(activeTab.terminalId)}>Close</button>
-              </> : null}
+              <span>{activeTab.statusDetail ?? "Connection interrupted. Retrying…"}</span>
             </div>
           ) : null}
           {findOpen && activeTab !== null ? (
@@ -1166,52 +1210,16 @@ export function FloatingTerminal({
           managedTab &&
           ownerOf(managedTab.scopeKey).projectId ? (
             <ProjectEnvironmentManagement
-              key={`environment:${ownerOf(managedTab.scopeKey).projectId}`}
+              key={`environment:${managedTab.scopeKey}`}
               rpc={rpc}
               projectId={ownerOf(managedTab.scopeKey).projectId!}
+              environmentId={ownerOf(managedTab.launchScopeKey ?? managedTab.scopeKey).environmentId ?? undefined}
               projectLabel={scopeLabel(managedTab.scopeKey, scopes)}
               onDismiss={dismissManagement}
             />
           ) : null}
-          {mode !== "shell" ? (
-            <TerminalSwitcher
-              tabs={availableTabs}
-              scopes={scopes}
-              context={terminalContext}
-              activeId={activeId}
-              visible={mode === "switch"}
-              busy={loading || creating}
-              onCreate={createInContext}
-              onManage={(id, nextMode) => {
-                managementReturnMode.current = "switch";
-                setManagedId(id);
-                setMode(nextMode);
-              }}
-              onRestart={(id) => {
-                managementReturnMode.current = "switch";
-                setManagedId(id);
-                setMode("restart");
-              }}
-              onFind={
-                activeTab
-                  ? () => {
-                      setMode("shell");
-                      openFind();
-                    }
-                  : undefined
-              }
-              maximize={
-                sheet
-                  ? null
-                  : {
-                      on: maximized,
-                      toggle: () => setMaximized((value) => !value),
-                    }
-              }
-              onSelect={selectTab}
-              onDismiss={dismissPicker}
-            />
-          ) : null}
+
+        </div>
         </div>
 
         {/* Only where the keys are actually missing, and only once there is a

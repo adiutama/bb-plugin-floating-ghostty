@@ -59,7 +59,7 @@ it("browses and edits project environments from plugin settings", async () => {
   try {
     expect(await slot.findByText("Alpha")).toBeTruthy();
     expect(slot.getByText("1 variable")).toBeTruthy();
-    expect(slot.queryByText("Beta")).toBeNull();
+    expect(slot.getByText("Beta")).toBeTruthy();
     expect(slot.getByText("Gamma")).toBeTruthy();
 
     fireEvent.change(slot.getByRole("textbox", { name: "Search projects" }), {
@@ -73,7 +73,7 @@ it("browses and edits project environments from plugin settings", async () => {
       ),
     );
     const dialog = await slot.findByRole("dialog", {
-      name: "Project environment",
+      name: "Environment variables",
     });
     expect(
       dialog.parentElement?.classList.contains("bb-fg-management-scrim"),
@@ -101,4 +101,32 @@ it("browses and edits project environments from plugin settings", async () => {
   } finally {
     slot.lifecycle.unmount();
   }
+});
+
+it("reviews a copy into a worktree and saves using the destination revision", async () => {
+  const app = await loadPluginApp(() => import("../app"));
+  const section = app.settingsSections.find((item) => item.id === "project-environments")!;
+  const slot = renderSlot(section, {}, { rpc: {
+    listProjectEnvironments: () => ({ projects: [
+      { id: "A", projectId: "A", name: "Alpha", configured: true, keyCount: 1, updatedAt: null },
+      { id: "worktree", projectId: "B", environmentId: "feature", name: "Beta / feature", configured: true, keyCount: 1, updatedAt: null },
+    ] }),
+    getProjectEnvironment: (input: any) => input.environmentId
+      ? { text: "OLD=destination", revision: 7 } : { text: "TOKEN=source", revision: 2 },
+    saveProjectEnvironment: () => ({ revision: 8, keyCount: 1 }),
+  } });
+  try {
+    const edit = await slot.findByRole("button", { name: "Edit environment for Alpha" });
+    await act(async () => fireEvent.click(edit));
+    await slot.findByDisplayValue("TOKEN=source");
+    await act(async () => fireEvent.click(slot.getByRole("button", { name: "Copy to…" })));
+    fireEvent.change(slot.getByLabelText("Copy to project or worktree"), { target: { value: "worktree" } });
+    await act(async () => fireEvent.click(slot.getByRole("button", { name: "Review copy" })));
+    expect(await slot.findByRole("textbox", { name: "Environment variables for Beta / feature" })).toHaveProperty("value", "TOKEN=source");
+    expect(slot.inspection.rpcCalls.filter((call) => call.method === "saveProjectEnvironment")).toHaveLength(0);
+    await act(async () => fireEvent.click(slot.getByRole("button", { name: "Save" })));
+    expect(slot.inspection.rpcCalls.filter((call) => call.method === "saveProjectEnvironment").map((call) => call.input)).toEqual([
+      { projectId: "B", environmentId: "feature", text: "TOKEN=source", expectedRevision: 7 },
+    ]);
+  } finally { slot.lifecycle.unmount(); }
 });

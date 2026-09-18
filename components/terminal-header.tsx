@@ -5,19 +5,15 @@ import { tabName, type TabState } from "../lib/tabs";
 export function TerminalHeader({
   tab,
   onSwitch,
-  onEnvironment,
   onHide,
   busy,
   expanded,
-  environmentOpen,
 }: {
   tab: TabState | null;
   onSwitch: () => void;
-  onEnvironment?: () => void;
   onHide: () => void;
   busy: boolean;
   expanded: boolean;
-  environmentOpen: boolean;
 }) {
   const directory = tab?.cwd ?? "";
   const segments = directory.replace(/\\/g, "/").split("/").filter(Boolean);
@@ -26,6 +22,20 @@ export function TerminalHeader({
     : directory;
   return (
     <div className="bb-fg-header">
+      <button
+        className="bb-fg-header-icon"
+        type="button"
+        data-no-drag=""
+        aria-label={expanded ? "Hide terminal sidebar" : "Show terminal sidebar"}
+        aria-controls="bb-fg-terminal-sidebar"
+        aria-expanded={expanded}
+        data-active={expanded ? "true" : undefined}
+        title="Terminal sidebar (⌘K / Ctrl+K)"
+        onClick={onSwitch}
+        disabled={busy}
+      >
+        <Icon name="PanelLeft" className="size-4" />
+      </button>
       <GhostMark className="bb-fg-header-ghost size-4 shrink-0" />
       <div className="bb-fg-session-title">
         <span className="bb-fg-header-name" title={tab ? tabName(tab) : "Terminal"}>
@@ -33,34 +43,6 @@ export function TerminalHeader({
         </span>
         {directory ? <span className="bb-fg-header-path" title={directory}>{shortDirectory}</span> : null}
       </div>
-      <button
-        className="bb-fg-header-icon"
-        type="button"
-        data-no-drag=""
-        aria-label="Switch terminal"
-        aria-haspopup="dialog"
-        aria-expanded={expanded}
-        data-active={expanded ? "true" : undefined}
-        title="Search terminals (⌘K / Ctrl+K)"
-        onClick={onSwitch}
-        disabled={busy}
-      >
-        <Icon name="Search" className="size-4" />
-      </button>
-      {onEnvironment ? (
-        <button
-          className="bb-fg-header-icon"
-          type="button"
-          data-no-drag=""
-          data-active={environmentOpen ? "true" : undefined}
-          onClick={onEnvironment}
-          title="Project environment"
-          aria-label="Edit project environment"
-          aria-pressed={environmentOpen}
-        >
-          <Icon name="Variable" className="size-4" />
-        </button>
-      ) : null}
       <button
         className="bb-fg-header-icon"
         type="button"

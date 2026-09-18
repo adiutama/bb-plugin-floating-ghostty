@@ -3,7 +3,6 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { act, fireEvent, waitFor, within } from "@testing-library/react";
 import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
 import { windowController } from "../lib/controller";
-import { projectScopeKey } from "../lib/context";
 import type { ServerTab } from "../lib/tabs";
 
 // Exercise the complete overlay/navigation UI; Ghostty itself has real-WASM pump tests.
@@ -137,7 +136,7 @@ const scopes = [
 function tab(id: string, scopeKey: string): ServerTab {
   return {
     terminalId: id,
-    scopeKey: projectScopeKey(scopeKey),
+    scopeKey,
     label: id,
     hostName: "Local",
     cwd: "/tmp",
@@ -197,9 +196,9 @@ async function setup(
       rpc: {
         resolveContext: async (input: unknown) => {
           await options.pendingContext;
-          const route = input as { projectId: string | null };
+          const route = input as { projectId: string | null; threadId: string | null };
           return route.projectId === "A"
-            ? { context, scopes }
+            ? { context: { ...context, environmentId: route.threadId === "thread-two" ? "two" : "one" }, scopes }
             : {
                 context: {
                   projectId: route.projectId,
@@ -319,8 +318,8 @@ function switcher(target: Element | Window = window) {
   fireEvent.keyDown(target, { key: "k", metaKey: true });
 }
 
-it.each(["project:A", "home:local"])(
-  "retains the exited shell in %s until explicitly closed",
+it.each(["worktree:A:one", "home:local"])(
+  "silently closes the exited shell in %s and selects a live sibling",
   async (scopeKey) => {
     const slot = await setup(
       [
@@ -334,13 +333,13 @@ it.each(["project:A", "home:local"])(
       await act(async () => toggle());
       await slot.findByRole("textbox", { name: "Shell first" });
       await act(async () => slot.exitTerminal("first"));
-      expect(slot.getByRole("textbox", { name: "Shell first" })).toBeTruthy();
-      expect(slot.getByText("Shell exited with code 0")).toBeTruthy();
-      expect(slot.getByRole("button", { name: "Start again" })).toBeTruthy();
+      await waitFor(() => expect(slot.queryByRole("textbox", { name: "Shell first" })).toBeNull());
+      expect(slot.getByRole("textbox", { name: "Shell second" })).toBeTruthy();
+      expect(slot.queryByText("Shell exited with code 0")).toBeNull();
       expect(windowController.isOpen()).toBe(true);
       expect(
         slot.inspection.rpcCalls.some((call) =>
-          ["openTab", "restartTab", "closeTab"].includes(call.method),
+          ["openTab", "restartTab"].includes(call.method),
         ),
       ).toBe(false);
     } finally {
@@ -349,10 +348,10 @@ it.each(["project:A", "home:local"])(
   },
 );
 
-it("retains an unvisited exited shell when search discovers it without changing the active shell", async () => {
+it("closes an unvisited exited shell when search discovers it without changing the active shell", async () => {
   const slot = await setup([
-    tab("first", "project:A"),
-    tab("hidden", "project:A"),
+    tab("first", "worktree:A:one"),
+    tab("hidden", "worktree:A:one"),
   ]);
   try {
     await act(async () => toggle());
@@ -361,7 +360,7 @@ it("retains an unvisited exited shell when search discovers it without changing 
     await act(async () => switcher());
     await slot.findByPlaceholderText("Search terminals");
     await waitFor(() =>
-      expect(slot.queryByRole("option", { name: /^hidden/ })).not.toBeNull(),
+      expect(slot.inspection.rpcCalls.some((call) => call.method === "closeTab" && (call.input as any).terminalId === "hidden")).toBe(true),
     );
     expect(slot.getByRole("option", { name: /^first/ })).toBeTruthy();
     expect(windowController.isOpen()).toBe(true);
@@ -405,7 +404,7 @@ it("opens directly into a newly created worktree shell, and toggles back without
 
 it("defaults projectless conversations to No project and keeps project shells out of that list", async () => {
   const slot = await setup(
-    [tab("project-shell", "project:A"), tab("home-shell", "home:local")],
+    [tab("project-shell", "worktree:A:one"), tab("home-shell", "home:local")],
     { projectless: true },
   );
   try {
@@ -489,10 +488,10 @@ it("defaults to the thread project, opens project filters with Cmd+P, and switch
     await waitFor(() => expect(document.activeElement).toBe(foreign));
     await act(async () => slot.exitTerminal("foreign"));
     expect(windowController.isOpen()).toBe(true);
-    expect(slot.getByText("Shell exited with code 0")).toBeTruthy();
+    expect(slot.queryByText("Shell exited with code 0")).toBeNull();
     expect(
       slot.inspection.rpcCalls.some((call) =>
-        ["openTab", "closeTab"].includes(call.method),
+        ["openTab"].includes(call.method),
       ),
     ).toBe(false);
   } finally {
@@ -697,7 +696,7 @@ it("creates immediately in the current context even while viewing a sibling shel
     await slot.findByRole("textbox", { name: "Shell current" });
     await act(async () => switcher());
     fireEvent.click(slot.getByRole("option", { name: /sibling/ }));
-    await act(async () => switcher());
+    expect(slot.getByRole("complementary", { name: "Terminal sidebar" })).toBeTruthy();
     fireEvent.click(slot.getByRole("button", { name: "New terminal" }));
     expect(slot.queryByRole("dialog", { name: "New terminal" })).toBeNull();
     const shell = await slot.findByRole("textbox", { name: "Shell created-1" });
@@ -898,7 +897,7 @@ it("renames from the actions menu and explicitly deletes the last shell without 
   }
 }, 40000);
 
-it("edits the environment belonging to a project terminal", async () => {
+it("edits the environment belonging to a worktree terminal", async () => {
   const slot = await setup([tab("current", "worktree:A:one")]);
   try {
     await act(async () => toggle());
@@ -914,11 +913,11 @@ it("edits the environment belonging to a project terminal", async () => {
       fireEvent.click(
         within(
           document.querySelector('[role="menu"]') as HTMLElement,
-        ).getByText("Project environment…"),
+        ).getByText("Environment variables…"),
       ),
     );
     const editor = await slot.findByRole("textbox", {
-      name: "Environment variables for Project A",
+      name: "Environment variables for Project A / one",
     });
     expect((editor as HTMLTextAreaElement).value).toBe("TOKEN=existing");
     fireEvent.change(editor, { target: { value: "TOKEN=updated" } });
@@ -932,6 +931,7 @@ it("edits the environment belonging to a project terminal", async () => {
     ).toEqual([
       {
         projectId: "A",
+        environmentId: "one",
         text: "TOKEN=updated",
         expectedRevision: 2,
       },
@@ -941,34 +941,24 @@ it("edits the environment belonging to a project terminal", async () => {
   }
 }, 40000);
 
-it("opens the active project's environment from the header", async () => {
+it("opens the current worktree environment from the attached sidebar", async () => {
   const slot = await setup([tab("current", "worktree:A:one")]);
   try {
     await act(async () => toggle());
     await slot.findByRole("textbox", { name: "Shell current" });
-
-    const environment = slot.getByRole("button", {
-      name: "Edit project environment",
-    });
-    expect(environment.getAttribute("aria-pressed")).toBe("false");
-    await act(async () => fireEvent.click(environment));
-
-    await slot.findByRole("textbox", {
-      name: "Environment variables for Project A",
-    });
-    expect(environment.getAttribute("aria-pressed")).toBe("true");
-    await act(async () => fireEvent.click(environment));
-
-    expect(
-      slot.queryByRole("dialog", { name: "Project environment" }),
-    ).toBeNull();
-    expect(
-      slot.queryByRole("dialog", { name: "Switch terminal" }),
-    ).toBeNull();
-  } finally {
-    slot.lifecycle.unmount();
-  }
-}, 40000);
+    expect(slot.queryByRole("button", { name: "Edit environment variables" })).toBeNull();
+    await act(async () => fireEvent.click(slot.getByRole("button", { name: "Show terminal sidebar" })));
+    const sidebar = slot.getByRole("complementary", { name: "Terminal sidebar" });
+    expect(sidebar.parentElement?.classList.contains("bb-fg-workspace")).toBe(true);
+    expect(slot.container.querySelector(".bb-fg-thread-search-scrim")).toBeNull();
+    await act(async () => fireEvent.click(within(sidebar).getByRole("button", { name: "Edit environment variables" })));
+    await slot.findByRole("textbox", { name: "Environment variables for Project A / one" });
+    const dialog = slot.getByRole("dialog", { name: "Environment variables" });
+    await act(async () => fireEvent.keyDown(dialog, { key: "Escape" }));
+    expect(slot.queryByRole("dialog", { name: "Environment variables" })).toBeNull();
+    expect(slot.getByRole("complementary", { name: "Terminal sidebar" })).toBe(sidebar);
+  } finally { slot.lifecycle.unmount(); }
+});
 
 it("manages a filtered inactive terminal without changing shells and preserves the selector on return", async () => {
   const slot = await setup([
@@ -980,7 +970,7 @@ it("manages a filtered inactive terminal without changing shells and preserves t
     const shell = await slot.findByRole("textbox", { name: "Shell current" });
     const header = slot.container.querySelector(".bb-fg-header")!;
     expect(within(header as HTMLElement).getAllByRole("button")).toHaveLength(
-      3,
+      2,
     );
     await act(async () => switcher(shell));
     const search = slot.getByPlaceholderText("Search terminals");
@@ -1002,7 +992,7 @@ it("manages a filtered inactive terminal without changing shells and preserves t
       expect(document.querySelector('[role="menu"]')).toBeNull(),
     );
     expect(
-      slot.getByRole("dialog", { name: "Switch terminal" }),
+      slot.getByRole("complementary", { name: "Terminal sidebar" }),
     ).not.toBeNull();
     await waitFor(() => expect(document.activeElement).toBe(action));
     await act(async () => fireEvent.keyDown(action, { key: "Enter" }));
@@ -1091,7 +1081,7 @@ it("uses Cmd+K only in terminal mode and releases it to BB when hidden", async (
     await act(async () =>
       fireEvent.keyDown(shell, { key: "p", metaKey: true }),
     );
-    expect(slot.queryByRole("dialog", { name: "Switch terminal" })).toBeNull();
+    expect(slot.queryByRole("complementary", { name: "Terminal sidebar" })).toBeNull();
     await act(async () => switcher(shell));
     const search = slot.getByPlaceholderText("Search terminals");
     await waitFor(() => expect(document.activeElement).toBe(search));
@@ -1099,7 +1089,7 @@ it("uses Cmd+K only in terminal mode and releases it to BB when hidden", async (
       fireEvent.keyDown(search, { key: "k", metaKey: true, repeat: true }),
     );
     expect(
-      slot.getByRole("dialog", { name: "Switch terminal" }),
+      slot.getByRole("complementary", { name: "Terminal sidebar" }),
     ).not.toBeNull();
     await act(async () => switcher(search));
     await waitFor(() => expect(document.activeElement).toBe(shell));
@@ -1118,7 +1108,7 @@ it("uses thread-search rows and treats a leading > as terminal search text", asy
   const slot = await setup([
     tab("current", "worktree:A:one"),
     tab("older", "worktree:A:two"),
-    { ...tab("literal", "project:A"), customTitle: ">find output" },
+    { ...tab("literal", "worktree:A:one"), customTitle: ">find output" },
   ]);
   try {
     await act(async () => toggle());
@@ -1182,7 +1172,7 @@ it("keeps window and find controls in session menus without changing search mode
         ).getByText("Find in terminal"),
       ),
     );
-    const find = slot.getByPlaceholderText("Find");
+    const find = await slot.findByPlaceholderText("Find");
     await waitFor(() => expect(document.activeElement).toBe(find));
     fireEvent.keyDown(find, { key: "Escape" });
     await waitFor(() => expect(document.activeElement).toBe(shell));
@@ -1200,7 +1190,7 @@ it("locks a landscape phone fullscreen and opens the picker without raising the 
     addEventListener() {},
     removeEventListener() {},
   }));
-  const slot = await setup([tab("current", "project:A")], {
+  const slot = await setup([tab("current", "worktree:A:one")], {
     settings: { customWindowSize: true, windowWidth: 360, windowHeight: 240 },
   });
   try {
@@ -1212,7 +1202,7 @@ it("locks a landscape phone fullscreen and opens the picker without raising the 
     expect(overlay.dataset.layout).toBe("sheet");
     expect(overlay.style.width).toBe("");
     await act(async () => switcher());
-    const picker = slot.getByRole("dialog", { name: "Switch terminal" });
+    const picker = slot.getByRole("complementary", { name: "Terminal sidebar" });
     await waitFor(() => expect(document.activeElement).toBe(picker));
     slot.getByRole("combobox", { name: "Search terminals" }).focus();
     fireEvent.click(slot.getByRole("button", { name: "Hide search keyboard" }));
@@ -1228,7 +1218,7 @@ it("locks a landscape phone fullscreen and opens the picker without raising the 
 it("opens the selector and switches sessions while background network requests remain pending", async () => {
   let release!: () => void;
   const pending = new Promise<void>((resolve) => { release = resolve; });
-  const slot = await setup([tab("first", "project:A"), tab("second", "project:A")], {
+  const slot = await setup([tab("first", "worktree:A:one"), tab("second", "worktree:A:one")], {
     pendingRead: pending,
     pendingSelection: pending,
   });
@@ -1236,12 +1226,12 @@ it("opens the selector and switches sessions while background network requests r
     await act(async () => toggle());
     await slot.findByRole("textbox", { name: "Shell first" });
     await act(async () => switcher());
-    expect(slot.getByRole("dialog", { name: "Switch terminal" })).not.toBeNull();
+    expect(slot.getByRole("complementary", { name: "Terminal sidebar" })).not.toBeNull();
     expect(slot.inspection.rpcCalls.some((call) => call.method === "read")).toBe(true);
     fireEvent.click(slot.getByRole("option", { name: /^second/ }));
     const second = await slot.findByRole("textbox", { name: "Shell second" });
     await waitFor(() => expect(document.activeElement).toBe(second));
-    expect(slot.queryByRole("dialog", { name: "Switch terminal" })).toBeNull();
+    expect(slot.getByRole("complementary", { name: "Terminal sidebar" })).not.toBeNull();
     expect(slot.inspection.rpcCalls.some((call) => call.method === "setActiveTab")).toBe(true);
   } finally {
     release();
@@ -1253,7 +1243,7 @@ it("opens the selector and switches sessions while background network requests r
 it("loads the terminal snapshot while context resolution is still pending", async () => {
   let release!: () => void;
   const pending = new Promise<void>((resolve) => { release = resolve; });
-  const slot = await setup([tab("current", "project:A")], { pendingContext: pending });
+  const slot = await setup([tab("current", "worktree:A:one")], { pendingContext: pending });
   try {
     await act(async () => toggle());
     expect(slot.inspection.rpcCalls.some((call) => call.method === "init")).toBe(true);
@@ -1269,7 +1259,7 @@ it("loads the terminal snapshot while context resolution is still pending", asyn
 it("keeps the loading indicator until the terminal confirms its first output is loaded", async () => {
   let release!: () => void;
   const pending = new Promise<void>((resolve) => { release = resolve; });
-  const slot = await setup([tab("current", "project:A")], { pendingContext: pending });
+  const slot = await setup([tab("current", "worktree:A:one")], { pendingContext: pending });
   try {
     await act(async () => toggle());
     expect(slot.getByRole("status").textContent).toContain("Opening terminal");
@@ -1302,3 +1292,70 @@ it("opens one new terminal with Cmd+N and leaves the shortcut alone when hidden"
     expect(creates[0]?.input).toMatchObject({ scopeKey: "worktree:A:one" });
   } finally { slot.lifecycle.unmount(); }
 });
+
+it("hides the window silently when the last shell exits", async () => {
+  const slot = await setup([tab("last", "worktree:A:one"), tab("foreign", "project:B")]);
+  try {
+    await act(async () => toggle());
+    await slot.findByRole("textbox", { name: "Shell last" });
+    await act(async () => slot.exitTerminal("last"));
+    await waitFor(() => expect(windowController.isOpen()).toBe(false));
+    expect(slot.queryByText("Shell exited with code 0")).toBeNull();
+    expect(slot.inspection.rpcCalls.filter((call) => call.method === "closeTab").map((call) => call.input))
+      .toEqual([{ terminalId: "last" }]);
+  } finally { slot.lifecycle.unmount(); }
+});
+
+it("creates for a worktree with no shell, then reuses each worktree's own shell", async () => {
+  const slot = await setup([tab("sibling", "worktree:A:two"), tab("default", "project:A")]);
+  try {
+    await act(async () => toggle());
+    await slot.findByRole("textbox", { name: "Shell created-1" });
+    expect(slot.inspection.rpcCalls.filter((call) => call.method === "openTab").map((call) => call.input))
+      .toEqual([{ scopeKey: "worktree:A:one", reuseExisting: true, cols: 80, rows: 24 }]);
+    await act(async () => slot.navigate({ projectId: "A", threadId: "thread-two" }));
+    await act(async () => toggle());
+    await slot.findByRole("textbox", { name: "Shell sibling" });
+    await act(async () => slot.navigate({ projectId: "A", threadId: "thread-one" }));
+    await act(async () => toggle());
+    await slot.findByRole("textbox", { name: "Shell created-1" });
+    await act(async () => slot.navigate({ projectId: "A", threadId: "another-thread-in-one" }));
+    await act(async () => toggle());
+    await slot.findByRole("textbox", { name: "Shell created-1" });
+    expect(slot.inspection.rpcCalls.filter((call) => call.method === "openTab")).toHaveLength(1);
+  } finally { slot.lifecycle.unmount(); }
+});
+
+
+it("collapses the sidebar after selection in a narrow terminal window", async () => {
+  const slot = await setup([tab("first", "worktree:A:one"), tab("second", "worktree:A:one")], {
+    settings: { customWindowSize: true, windowWidth: 400, windowHeight: 400 },
+  });
+  try {
+    await act(async () => toggle());
+    await slot.findByRole("textbox", { name: "Shell first" });
+    await act(async () => switcher());
+    expect(slot.getByRole("complementary", { name: "Terminal sidebar" })).toBeTruthy();
+    await act(async () => fireEvent.click(slot.getByRole("option", { name: /^second/ })));
+    const shell = await slot.findByRole("textbox", { name: "Shell second" });
+    await waitFor(() => expect(document.activeElement).toBe(shell));
+    expect(slot.queryByRole("complementary", { name: "Terminal sidebar" })).toBeNull();
+  } finally { slot.lifecycle.unmount(); }
+});
+
+it("closes sidebar menus when the terminal window is hidden", async () => {
+  const slot = await setup([tab("current", "worktree:A:one")]);
+  try {
+    await act(async () => toggle());
+    await slot.findByRole("textbox", { name: "Shell current" });
+    await act(async () => switcher());
+    await act(async () => fireEvent.keyDown(slot.getByRole("button", { name: "Actions for current" }), { key: "Enter" }));
+    const menu = document.querySelector('[role="menu"]')!;
+    expect(menu).not.toBeNull();
+    await act(async () => toggle(menu));
+    await waitFor(() => expect(document.querySelector('[role="menu"]')).toBeNull());
+    expect(windowController.isOpen()).toBe(false);
+    await act(async () => toggle());
+    expect(await slot.findByRole("complementary", { name: "Terminal sidebar" })).toBeTruthy();
+  } finally { slot.lifecycle.unmount(); }
+}, 30000);

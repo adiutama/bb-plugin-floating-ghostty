@@ -4,7 +4,8 @@ import { join } from "node:path";
 // bb-plugin-floating-ghostty — backend.
 //
 // Persistent terminal inventory in front of `bb.sdk.terminals`. Each record maps
-// to one real PTY and belongs to a project or no project. The open-tab list and the active tab are kv-persisted, so closing the
+// to one real PTY owned by its launch worktree, default checkout, or host home.
+// The open-tab list and active tab are kv-persisted, so closing the
 // window, reloading the app, or restarting bb reattaches every surviving shell
 // instead of losing them.
 //
@@ -22,7 +23,7 @@ import { join } from "node:path";
 //     applied, so a slow `init` can never resurrect a closed tab or drop a
 //     freshly opened one just because it started earlier.
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
-import { ownerOf, projectScopeKey } from "./lib/context";
+import { ownerOf } from "./lib/context";
 import { shellStartCommand } from "./lib/shell-integration";
 import { BB_TERMINAL_FONT_SIZE } from "./lib/theme";
 import { hostContract } from "./lib/host-contract";
@@ -42,7 +43,7 @@ import { z } from "zod";
 const REPLAY_TAIL_BYTES = 256_000;
 
 const scopeSchema = z.object({
-  /** Stable id: `home:<hostId>` or `project:<projectId>`. */
+  /** Stable id: `worktree:<projectId>:<environmentId>`, `project:<projectId>`, or `home:<hostId>`. */
   key: z.string(),
   label: z.string(),
   /** Absolute path, or "~" for the host's home directory. */
@@ -58,6 +59,7 @@ const scopeSchema = z.object({
 const tabSchema = z.object({
   terminalId: z.string(),
   scopeKey: z.string(),
+  launchScopeKey: z.string().optional(),
   label: z.string(),
   hostName: z.string(),
   cwd: z.string(),
@@ -110,19 +112,21 @@ export const rpcContract = defineRpcContract({
     output: z.array(shortcutSchema),
   },
   getProjectEnvironment: {
-    input: z.object({ projectId: projectIdSchema }).strict(),
+    input: z.object({ projectId: projectIdSchema, environmentId: projectIdSchema.optional() }).strict(),
     output: z
       .object({ text: z.string(), revision: z.number().int().min(0) })
       .strict(),
   },
   listProjectEnvironments: {
-    input: z.null(),
+    input: z.object({ includeUnconfigured: z.boolean() }).strict().nullable(),
     output: z.object({
       projects: z.array(
         z
           .object({
             id: z.string(),
             name: z.string(),
+            environmentId: z.string().optional(),
+            projectId: z.string().optional(),
             configured: z.boolean(),
             keyCount: z.number().int().min(0),
             updatedAt: z.string().nullable(),
@@ -135,6 +139,7 @@ export const rpcContract = defineRpcContract({
     input: z
       .object({
         projectId: projectIdSchema,
+        environmentId: projectIdSchema.optional(),
         text: z.string().max(PROJECT_ENVIRONMENT_MAX_BYTES),
         expectedRevision: z.number().int().min(0),
       })
@@ -164,7 +169,7 @@ export const rpcContract = defineRpcContract({
   },
   openTab: {
     input: z
-      .object({ scopeKey: z.string() })
+      .object({ scopeKey: z.string(), reuseExisting: z.boolean().optional() })
       .extend(geometrySchema.shape)
       .strict(),
     output: z.object({ snapshot: snapshotSchema, opened: tabSchema }),
@@ -629,12 +634,12 @@ export default async function plugin(bb: BbPluginApi) {
         }),
       )
       .safeParse(await bb.storage.kv.get(TABS_KEY));
-    // Normalize old worktree owners without losing the original restart location.
+    // Recover worktree ownership from records written while tabs were grouped by project.
     return result.success
       ? result.data.map((entry) => ({
           ...entry,
           launchScopeKey: entry.launchScopeKey ?? entry.scopeKey,
-          scopeKey: projectScopeKey(entry.scopeKey),
+          scopeKey: entry.launchScopeKey ?? entry.scopeKey,
         }))
       : [];
   }
@@ -823,6 +828,7 @@ export default async function plugin(bb: BbPluginApi) {
           const tab: Tab = {
             terminalId: session.id,
             scopeKey: entry.scopeKey,
+            launchScopeKey: entry.launchScopeKey ?? entry.scopeKey,
             label,
             hostName,
             cwd: entry.cwd ?? session.initialCwd,
@@ -852,6 +858,7 @@ export default async function plugin(bb: BbPluginApi) {
             lastKnownTabs.get(entry.terminalId) ?? {
               terminalId: entry.terminalId,
               scopeKey: entry.scopeKey,
+              launchScopeKey: entry.launchScopeKey ?? entry.scopeKey,
               label: entry.shellName ?? "Shell",
               hostName:
                 scopes.find((scope) => scope.hostId === entry.hostId)
@@ -941,6 +948,19 @@ export default async function plugin(bb: BbPluginApi) {
     return scope;
   }
 
+  // Preserve legacy default-checkout records and host paths; worktrees use a
+  // separate identity for storage, refresh tracking, and private host files.
+  function environmentKey(projectId: string, environmentId?: string | null): string {
+    return environmentId ? JSON.stringify([projectId, environmentId]) : projectId;
+  }
+  function tabEnvironmentKey(tab: StoredTab): string | null {
+    const owner = ownerOf(tab.launchScopeKey ?? tab.scopeKey);
+    return owner.projectId ? environmentKey(owner.projectId, owner.environmentId) : null;
+  }
+  async function validateEnvironment(projectId: string, environmentId?: string) {
+    if (environmentId) await worktreeScope(projectId, environmentId);
+  }
+
   const environmentHosts = new Map<string, Set<string>>();
   const appliedEnvironments = new Map<string, number>();
   const environmentRetries = new Map<string, number>();
@@ -950,7 +970,7 @@ export default async function plugin(bb: BbPluginApi) {
   // Retry after reconnect (and after a plugin reload) without holding output
   // polling behind host RPC. Saves and retries share the revision ordering.
   function refreshSessionEnvironment(tab: StoredTab): void {
-    const projectId = ownerOf(tab.scopeKey).projectId;
+    const projectId = tabEnvironmentKey(tab);
     const hostId = tab.hostId;
     if (!projectId || !hostId) return;
     const key = environmentHostKey(projectId, hostId);
@@ -984,7 +1004,8 @@ export default async function plugin(bb: BbPluginApi) {
     rows: number,
   ): Promise<Tab> {
     let environmentFile: string | null = null;
-    const projectId = ownerOf(scope.key).projectId;
+    const owner = ownerOf(scope.key);
+    const projectId = owner.projectId ? environmentKey(owner.projectId, owner.environmentId) : null;
     if (projectId !== null) {
       const prepared = await serializeEnvironment(async () => {
         const hosts = environmentHosts.get(projectId) ?? new Set<string>();
@@ -1022,7 +1043,8 @@ export default async function plugin(bb: BbPluginApi) {
     bb.log.info(`opened ${created.id} in ${created.initialCwd}`);
     return {
       terminalId: created.id,
-      scopeKey: projectScopeKey(scope.key),
+      scopeKey: scope.key,
+      launchScopeKey: scope.key,
       label: "Shell",
       hostName: scope.hostName,
       cwd: created.initialCwd,
@@ -1032,6 +1054,34 @@ export default async function plugin(bb: BbPluginApi) {
       customTitle: null,
     };
   }
+
+  async function openSession(scopeKey: string, cols: number, rows: number) {
+    // The slow parts — resolving the scope and spawning the PTY — run
+    // outside the mutation mutex. Held across a create they queued every
+    // other handler (init from another window, closes, the read polls)
+    // behind one slow host for up to the whole create timeout.
+    const scope = await requireScope(scopeKey);
+    const opened = await createSession(scope, cols, rows);
+    return serialize(async () => {
+      const stored = await readStoredTabs();
+      stored.push({
+        terminalId: opened.terminalId,
+        scopeKey: opened.scopeKey,
+        launchScopeKey: scope.key,
+        hostId: scope.hostId,
+        autoTitle: null,
+      });
+      await bb.storage.kv.set(TABS_KEY, stored);
+      await bb.storage.kv.set(ACTIVE_TAB_KEY, opened.terminalId);
+      await rememberRecent(opened.scopeKey);
+      await bumpRevision();
+      lastKnownTabs.set(opened.terminalId, opened);
+      rememberStatus(opened.terminalId, opened.status, opened.exitCode);
+      return { snapshot: await snapshot(), opened };
+    });
+  }
+
+  const pendingWorktreeOpens = new Map<string, ReturnType<typeof openSession>>();
 
   bb.rpc.register(rpcContract, {
     async resolveContext({ projectId, threadId }) {
@@ -1090,45 +1140,58 @@ export default async function plugin(bb: BbPluginApi) {
         .map((binding) => binding.shortcut);
     },
 
-    async getProjectEnvironment({ projectId }) {
-      const stored = getStoredEnvironment(projectId);
+    async getProjectEnvironment({ projectId, environmentId }) {
+      await validateEnvironment(projectId, environmentId);
+      const stored = getStoredEnvironment(environmentKey(projectId, environmentId));
       return stored === undefined
         ? { text: "", revision: 0 }
         : { text: stored.text, revision: stored.revision };
     },
 
-    async listProjectEnvironments() {
+    async listProjectEnvironments(input) {
       const projects = await withTimeout(
-        bb.sdk.projects.list({ includePersonal: true }),
-        SDK_TIMEOUT_MS,
-        "projects.list",
+        bb.sdk.projects.list({ includePersonal: true, ...(input?.includeUnconfigured ? { include: "threads" as const } : {}) }),
+        SDK_TIMEOUT_MS, "projects.list",
       );
-      const stored = getStoredEnvironments();
-      return {
-        projects: projects
-          .map((project) => {
-            const environment = stored[project.id];
-            const keyCount = environment
-              ? parseProjectEnvironment(environment.text).length
-              : 0;
-            return {
-              id: project.id,
-              name: project.name,
-              configured: keyCount > 0,
-              keyCount,
-              updatedAt: environment?.updatedAt ?? null,
-            };
-          })
-          .filter((project) => project.configured)
-          .sort((left, right) =>
-            left.name.localeCompare(right.name, undefined, {
-              sensitivity: "base",
-            }),
-          ),
-      };
+      const tabs = await readStoredTabs();
+      const storedKeys = Object.keys(getStoredEnvironments());
+      const targets: { id: string; projectId: string; name: string; environmentId?: string }[] = [];
+      for (const project of projects) {
+        targets.push({ id: project.id, projectId: project.id, name: project.name });
+        const ids = new Set<string>();
+        if ("threads" in project) for (const thread of project.threads) {
+          if (thread.environmentId) ids.add(thread.environmentId);
+        }
+        for (const key of storedKeys) {
+          try {
+            const value: unknown = JSON.parse(key);
+            if (Array.isArray(value) && value.length === 2 && value[0] === project.id && typeof value[1] === "string") ids.add(value[1]);
+          } catch { /* Legacy project keys are not JSON tuples. */ }
+        }
+        for (const tab of tabs) {
+          const owner = ownerOf(tab.launchScopeKey ?? tab.scopeKey);
+          if (owner.projectId === project.id && owner.environmentId) ids.add(owner.environmentId);
+        }
+        const worktrees = await Promise.all([...ids].map(async (environmentId) => {
+          const scope = await worktreeScope(project.id, environmentId).catch(() => null);
+          return scope ? {
+            id: environmentKey(project.id, environmentId), projectId: project.id,
+            environmentId, name: `${project.name} / ${scope.label}`,
+          } : null;
+        }));
+        for (const target of worktrees) if (target) targets.push(target);
+      }
+      return { projects: targets.map((target) => {
+        const stored = getStoredEnvironment(target.id);
+        const keyCount = parseProjectEnvironment(stored?.text ?? "").length;
+        return { ...target, configured: keyCount > 0, keyCount, updatedAt: stored?.updatedAt ?? null };
+      }).filter((target) => input?.includeUnconfigured || target.configured)
+        .sort((a, b) => a.name.localeCompare(b.name)) };
     },
 
-    async saveProjectEnvironment({ projectId, text, expectedRevision }) {
+    async saveProjectEnvironment({ projectId: ownerProjectId, environmentId, text, expectedRevision }) {
+      await validateEnvironment(ownerProjectId, environmentId);
+      const projectId = environmentKey(ownerProjectId, environmentId);
       const entries = parseProjectEnvironment(text);
       return serializeEnvironment(async () => {
         const stored = getStoredEnvironments();
@@ -1164,7 +1227,7 @@ export default async function plugin(bb: BbPluginApi) {
         const hosts = new Set([
           ...(environmentHosts.get(projectId) ?? []),
           ...(await readStoredTabs())
-            .filter((tab) => ownerOf(tab.scopeKey).projectId === projectId)
+            .filter((tab) => tabEnvironmentKey(tab) === projectId)
             .map((tab) => tab.hostId)
             .filter((id): id is string => id !== undefined),
         ]);
@@ -1203,30 +1266,19 @@ export default async function plugin(bb: BbPluginApi) {
       };
     },
 
-    async openTab({ scopeKey, cols, rows }) {
-      // The slow parts — resolving the scope and spawning the PTY — run
-      // outside the mutation mutex. Held across a create they queued every
-      // other handler (init from another window, closes, the read polls)
-      // behind one slow host for up to the whole create timeout.
-      const scope = await requireScope(scopeKey);
-      const opened = await createSession(scope, cols, rows);
-      return serialize(async () => {
-        const stored = await readStoredTabs();
-        stored.push({
-          terminalId: opened.terminalId,
-          scopeKey: opened.scopeKey,
-          launchScopeKey: scope.key,
-          hostId: scope.hostId,
-          autoTitle: null,
-        });
-        await bb.storage.kv.set(TABS_KEY, stored);
-        await bb.storage.kv.set(ACTIVE_TAB_KEY, opened.terminalId);
-        await rememberRecent(opened.scopeKey);
-        await bumpRevision();
-        lastKnownTabs.set(opened.terminalId, opened);
-        rememberStatus(opened.terminalId, opened.status, opened.exitCode);
-        return { snapshot: await snapshot(), opened };
-      });
+    async openTab({ scopeKey, cols, rows, reuseExisting }) {
+      if (!reuseExisting) return openSession(scopeKey, cols, rows);
+      const pending = pendingWorktreeOpens.get(scopeKey);
+      if (pending) return pending;
+      const opening = (async () => {
+        const current = await serialize(async () => verifiedSnapshot(await readStoredTabs()));
+        const existing = current.tabs.find((tab) =>
+          tab.scopeKey === scopeKey && tab.status !== "exited" && tab.status !== "gone");
+        return existing ? { snapshot: current, opened: existing } : openSession(scopeKey, cols, rows);
+      })();
+      pendingWorktreeOpens.set(scopeKey, opening);
+      try { return await opening; }
+      finally { pendingWorktreeOpens.delete(scopeKey); }
     },
 
     async setTabCwd({ terminalId, cwd }) {

@@ -5,25 +5,27 @@ terminal window with Ghostty's terminal engine through Wterm.
 
 Open the ghost button in BB's sidebar footer, or press **Ctrl+backtick**.
 Terminal mode opens straight into a shell, ready to type. Its quiet header holds
-the ghost, session name and shortened directory, search, project environment, and hide controls. Press the same shortcut,
+the sidebar toggle, ghost, session name and shortened directory, and hide control. Press the same shortcut,
 use the **×**, or click outside to return to BB. Your shells keep running.
 
 ## Context and terminal selection
 
-Each terminal belongs to a **Project** or **No project**.
+Each terminal belongs to the **worktree where it was created**.
 Changing directory inside a shell does not change its owner.
 
-- Every terminal belongs to a project or **No project**. Worktrees determine where
-  a shell starts, not its ownership.
-- Reopening remembers your selection per project on this client. Without a
-  remembered selection, it opens the most recently visited terminal in that project.
-- If none matches, it starts a shell in the current thread's environment, or the
-  project's default checkout. Projectless conversations use a machine's home directory.
-  An unavailable current machine/worktree produces a recovery state.
+- Opening the terminal checks the current thread’s worktree. If it already has
+  a terminal, that terminal is shown; otherwise a new shell starts there.
+- Selection is remembered independently per worktree. Another worktree’s shell
+  is never reused automatically, even when both belong to the same project.
+- Threads without a worktree use the project’s default checkout. Projectless
+  conversations use a machine’s home directory. An unavailable current
+  machine/worktree produces a recovery state.
+- **New terminal** explicitly creates an additional shell in the selected context.
 - Navigating to another thread or project hides the overlay without stopping shells.
+- Existing sessions recover their worktree ownership from their saved launch location.
 
-The header’s search icon or **Cmd+K** (Ctrl+K on other platforms) opens the terminal switcher. The project
-filter sits on the right of the search row; **Cmd/Ctrl+P** opens it. It defaults to
+The header’s sidebar toggle or **Cmd+K** (Ctrl+K on other platforms) opens the attached terminal sidebar. The project
+filter sits below search; **Cmd/Ctrl+P** opens it. It defaults to
 the project owning the current thread, or **No project**. Type in the picker to search projects. **All** shows terminals
 across every project, including projectless terminals. Selecting another project
 filters the list without switching the active shell. Enter switches to the
@@ -31,9 +33,12 @@ highlighted terminal, including terminals in another project; Escape returns to
 the existing shell.
 
 The selector uses a shared session list: terminal names, project and machine,
-and the working directory. The current terminal has a check and outlined row.
-On phones it fills the terminal body; on desktop it opens as a centered Spotlight-style palette.
-The project filter truncates long names, and the footer contains only New terminal.
+and the working directory. The current terminal has a status dot and highlighted row.
+The sidebar sits on the left beside the shell on desktop, using BB’s muted surfaces
+and compact rows. Selecting a shell keeps the sidebar open. On phones and narrow
+windows it fills the terminal body and collapses after selection. Search is part of
+the sidebar, never a separate floating dialog.
+The footer holds **Environment variables** and **New terminal**.
 Touch devices focus the list without automatically opening the keyboard. Recently used terminals come first,
 and matching title text is highlighted. Search always finds terminals, including
 names starting with **>**.
@@ -54,18 +59,22 @@ terminal key. Terminal mode contains keyboard input, including portaled menus,
 so it does not reach BB's in-app shortcuts. OS-reserved shortcuts and native
 application-menu commands remain controlled by BB/the operating system.
 
-Exited shells keep their output visible. Use **Start again** to launch a new
-shell or **Close** to remove the terminal.
+Exited shells close automatically without a notification. The next live shell
+is selected, or the window hides when no shell remains in the current worktree.
 
-The variable button beside **×** opens the active project’s environment directly.
-Each project session’s **⋯** menu also provides **Project environment…** alongside
+**Environment variables** in the sidebar footer opens the active terminal’s worktree environment.
+Each project session’s **⋯** menu also provides **Environment variables…** alongside
 **Rename…**, **Restart shell**, and **Delete terminal…**. The environment editor
 accepts strict dotenv assignments and applies them at the next prompt in zsh,
-bash, and fish across every worktree owned by that project. Running commands keep
+bash, and fish only in the selected default checkout or worktree. Each worktree
+has independent variables and starts empty. Existing project values remain on the
+default checkout. Running commands keep
 their current environment. Removed variables are unset. Shells opened before this
-update need one restart to install the refresh hook; other shells apply values at
-startup. The plugin Settings page lists configured project environments
-and lets you search, inspect, and edit each one.
+update need one restart to use the isolated worktree environment file; other shells
+apply values at startup. The plugin Settings page lists projects and worktrees,
+including empty environments. Use **Copy to…**, choose a destination, then
+**Review copy** to edit the copied variables before saving. Saving replaces the
+destination’s variables; the source is unchanged and future edits are independent.
 Managing another session leaves your current shell selected.
 Closing a management dialog returns to the selector with its search and filter
 preserved. Deletion asks for
@@ -125,7 +134,7 @@ native configuration file.
 | Move / resize      | Drag the header / an edge or corner                |
 | Maximize / restore | Session ⋯ menu, or double-click empty header space |
 | Rename             | Selector → session ⋯ → Rename…                     |
-| Project environment| Variable icon beside **×**, or selector → session ⋯  |
+| Environment variables | Sidebar footer, or session ⋯ menu              |
 | Delete a shell     | Selector → session ⋯ → Delete terminal…            |
 | Restart            | Selector → session ⋯ → Restart shell               |
 | Find               | Cmd/Ctrl+F inside the terminal                     |
@@ -156,8 +165,7 @@ The terminal matches BB's native 12px monospace rendering and shares the app's z
 There is no separate plugin font-size setting.
 
 The frame, terminal, selector, and management controls inherit BB's theme. Existing POC
-machine-home sessions appear under No project; legacy worktree sessions belong
-to their project. Existing processes and original restart locations are preserved.
+machine-home sessions appear under No project; legacy sessions recover their original worktree ownership. Existing processes and original restart locations are preserved.
 
 ## Development and verification
 
@@ -173,9 +181,28 @@ persistence, window geometry, the actual pinned Ghostty WASM, Unicode, TUI scree
 switches, replay suppression, hidden-tab polling, input, disposal, and overlay
 registration with the BB frontend harness.
 
+### Worktree ownership contract
+
+Keep these rules consistent across the server, overlay, and selection memory:
+
+- `scopeKey` is the exact launch scope. Never collapse `worktree:<project>:<environment>`
+  to `project:<project>`. A project key represents only its default checkout.
+- `availableHere` and `contextKey` include the environment identity. Saved project-wide
+  selections, recent sibling shells, and default-checkout shells cannot satisfy a worktree open.
+- Automatic opens use `reuseExisting: true`. The server checks the exact scope and
+  coalesces concurrent automatic opens. Explicit **New terminal** creates another shell.
+- Reload and restart preserve ownership. Legacy project-grouped records recover
+  their scope from `launchScopeKey`. Changing shell directory does not transfer ownership.
+- Project filters group terminals for browsing only; they do not determine reuse or ownership.
+- Exited shells are removed silently; disconnected shells remain available for reconnection.
+
+Regression coverage lives in `lib/context.test.ts` (exact matching and selection keys),
+`tests/server.test.ts` (migration, restart, concurrent reuse), and `tests/app.test.tsx`
+(thread switching, create-or-show, environment editing, and exit cleanup).
+
 An additional smoke test exercises the **running BB server**, creates a temporary
 shell, sends input, renders its output through the real Ghostty engine, tests
-resize/replay/restart and retained exit output, and cleans up its test shells:
+resize/replay/restart and shell exit detection, and cleans up its test shells:
 
 ```sh
 npm run test:live
@@ -192,12 +219,12 @@ window was unavailable during this implementation.
   trusted content script. `lib/native-launcher.ts` redirects native terminal launch actions using
   its current BB DOM ID; this small host adapter may need updating if BB changes
   its action markup. It restores the action on opt-out or plugin unload.
-- `components/floating-terminal.tsx` owns the shell/switcher flow, context selection, and window layout.
+- `components/floating-terminal.tsx` owns the shell/sidebar flow, context selection, and window layout.
 - `lib/context.ts` defines project visibility, scope priority, and client selection memory.
-- `components/terminal-switcher.tsx` owns the flat list and filters.
+- `components/terminal-sidebar.tsx` owns attached search, session list, filters, and footer controls.
 - `components/terminal-management.tsx` owns naming and deletion dialogs.
 - `components/project-environment-management.tsx` owns the project dotenv editor.
-- `components/project-environment-settings.tsx` provides the searchable project
+- `components/project-environment-settings.tsx` provides the searchable project and worktree
   environment inventory on the plugin Settings page.
 - `lib/shell-integration.ts` installs session-local shell title hooks; `lib/terminal-title.ts`
   reads bounded OSC title signals because the pinned Ghostty adapter lacks title reporting.
@@ -250,8 +277,8 @@ and dependency licenses. Plugin code is [MIT licensed](LICENSE).
 - On macOS, Cmd+F opens Find; Ctrl+F and Ctrl+V reach the shell. Cmd+Left/Right
   move to line start/end; modified arrows preserve their modifiers in legacy mode.
 - Toolbar input and paste return to the latest output, like physical typing.
-- Exited shells retain their output with Start again and Close actions. Restarting
-  from the selector asks before stopping the shell and replacing its output.
+- Exited shells close silently. Restarting from the selector asks before stopping
+  the shell and replacing its output.
 - Cell backgrounds stay within cells. Cursor shape/blink requests are observed
   across output chunks; supported RGB theme colors are reflected in OSC 10/11 replies.
 - Search includes all retained matches and maps wide glyphs to terminal columns.

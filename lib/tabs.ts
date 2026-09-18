@@ -14,6 +14,7 @@ export type TabStatus = "connecting" | "live" | "exited" | "error";
 export interface TabState {
   terminalId: string;
   scopeKey: string;
+  launchScopeKey?: string;
   label: string;
   hostName: string;
   cwd: string;
@@ -41,6 +42,7 @@ export interface TabsState {
 export interface ServerTab {
   terminalId: string;
   scopeKey: string;
+  launchScopeKey?: string;
   label: string;
   hostName: string;
   cwd: string;
@@ -74,13 +76,14 @@ function fromServer(tab: ServerTab): TabState {
   return {
     terminalId: tab.terminalId,
     scopeKey: tab.scopeKey,
+    launchScopeKey: tab.launchScopeKey,
     label: tab.label,
     hostName: tab.hostName,
     cwd: tab.cwd,
     status:
       tab.status === "running" || tab.status === "starting"
         ? "connecting" // live once the pump's first read confirms it
-        : "exited",
+        : tab.status === "exited" || tab.status === "gone" ? "exited" : "error",
     statusDetail: null,
     shellTitle: tab.shellTitle,
     customTitle: tab.customTitle ?? null,
@@ -105,6 +108,9 @@ export function tabsReducer(state: TabsState, action: TabsAction): TabsState {
       const tabs = action.snapshot.tabs.map((tab) => {
         const existing = previous.get(tab.terminalId);
         if (existing === undefined) return fromServer(tab);
+        if ((tab.status === "exited" || tab.status === "gone") && existing.status !== "exited") {
+          return fromServer(tab);
+        }
         // Naming and ownership are the server's half of the split and flow through
         // to a tab the client already knows; status stays the client's. Reuse
         // the existing object when neither changed, or every snapshot would
@@ -114,6 +120,7 @@ export function tabsReducer(state: TabsState, action: TabsAction): TabsState {
           existing.label === tab.label &&
           existing.cwd === tab.cwd &&
           existing.scopeKey === tab.scopeKey &&
+          existing.launchScopeKey === tab.launchScopeKey &&
           (existing.customTitle ?? null) === (tab.customTitle ?? null)
         ) {
           return existing;
@@ -121,6 +128,7 @@ export function tabsReducer(state: TabsState, action: TabsAction): TabsState {
         return {
           ...existing,
           scopeKey: tab.scopeKey,
+          launchScopeKey: tab.launchScopeKey,
           cwd: tab.cwd,
           label: tab.label,
           shellTitle: tab.shellTitle,

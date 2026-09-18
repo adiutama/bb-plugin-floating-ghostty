@@ -62,8 +62,8 @@ export function ProjectFilter({
             }
           }}
           className="bb-fg-project-menu"
-          align="end"
-          sideOffset={6}
+          align="start"
+          sideOffset={4}
           aria-label="Filter by project"
           onKeyDown={isolateTerminalKey}
           onKeyUp={isolateTerminalKey}

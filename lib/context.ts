@@ -22,40 +22,29 @@ export function ownerOf(key: string) {
   };
 }
 
-/** Legacy worktree keys still resolve to their project. Home keys have no project. */
-export function projectScopeKey(key: string): string {
-  const owner = ownerOf(key);
-  return owner.projectId === null ? key : `project:${owner.projectId}`;
-}
-
 export function availableHere(key: string, context: TerminalContext): boolean {
-  return ownerOf(key).projectId === context.projectId;
+  const owner = ownerOf(key);
+  return owner.projectId === context.projectId &&
+    owner.environmentId === context.environmentId;
 }
 
 export function contextKey(context: TerminalContext): string {
   return context.projectId === null
     ? "no-project"
-    : `project:${context.projectId}`;
-}
-
-/** Creation prefers the thread's environment, while ownership stays with its project. */
-export function scopePriority(key: string, context: TerminalContext): number {
-  const owner = ownerOf(key);
-  if (!availableHere(key, context)) return 99;
-  if (owner.kind === "worktree")
-    return owner.environmentId === context.environmentId ? 0 : 99;
-  return 1;
+    : context.environmentId !== null
+      ? `worktree:${context.projectId}:${context.environmentId}`
+      : `project:${context.projectId}`;
 }
 
 export function preferredTerminal<
-  T extends { terminalId: string; scopeKey: string },
+  T extends { terminalId: string; scopeKey: string; status?: string },
 >(
   tabs: T[],
   context: TerminalContext,
   remembered: string | undefined,
   recent: string[],
 ): T | undefined {
-  const available = tabs.filter((tab) => availableHere(tab.scopeKey, context));
+  const available = tabs.filter((tab) => availableHere(tab.scopeKey, context) && tab.status !== "exited" && tab.status !== "gone");
   const previous = available.find((tab) => tab.terminalId === remembered);
   if (previous) return previous;
   const rank = (id: string) => {
@@ -71,10 +60,9 @@ export function preferredScope(
 ) {
   // Never silently fall back to a different machine when the intended one is offline.
   return scopes
-    .filter((scope) => scopePriority(scope.key, context) < 99)
+    .filter((scope) => availableHere(scope.key, context))
     .sort(
       (a, b) =>
-        scopePriority(a.key, context) - scopePriority(b.key, context) ||
         Number(b.hostId === context.hostId) -
           Number(a.hostId === context.hostId) ||
         (context.hostId === null ? Number(b.online) - Number(a.online) : 0),
@@ -87,7 +75,12 @@ export function scopeLabel(key: string, scopes: ScopeOption[]): string {
   const project = scopes.find(
     (item) => item.key === `project:${owner.projectId}`,
   );
-  return project?.label ?? "Project unavailable";
+  const projectLabel = project?.label ?? "Project unavailable";
+  if (owner.environmentId) {
+    const worktree = scopes.find((scope) => scope.key === key);
+    return `${projectLabel} / ${worktree?.label ?? owner.environmentId}`;
+  }
+  return projectLabel;
 }
 
 interface SelectionMemory {

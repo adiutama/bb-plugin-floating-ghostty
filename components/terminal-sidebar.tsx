@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Command, CommandInput, CommandItem, CommandList } from "./ui/command";
 import { defaultFilter, useCommandState } from "cmdk";
-import { containTab, isolateTerminalKey } from "../lib/keyboard";
+import { isolateTerminalKey } from "../lib/keyboard";
 import { usePointerCoarse } from "./ui/hooks/use-pointer-coarse";
 import { ProjectFilter } from "./project-filter";
 import type { ManagementMode } from "./terminal-management";
@@ -17,13 +17,12 @@ import {
   scopeLabel,
   ownerOf,
   readSelection,
-  contextKey,
   type TerminalContext,
 } from "../lib/context";
 import type { ScopeOption } from "../lib/scopes";
 import { tabName, type TabState } from "../lib/tabs";
 
-export function TerminalSwitcher({
+export function TerminalSidebar({
   tabs,
   scopes,
   context,
@@ -31,6 +30,8 @@ export function TerminalSwitcher({
   onSelect,
   onDismiss,
   visible,
+  focusSearch,
+  onEnvironment,
   busy,
   onCreate,
   onManage,
@@ -45,6 +46,8 @@ export function TerminalSwitcher({
   onSelect: (id: string) => void;
   onDismiss: () => void;
   visible: boolean;
+  focusSearch: boolean;
+  onEnvironment?: () => void;
   busy: boolean;
   onCreate: (projectId: string | null) => void;
   onManage: (id: string, mode: ManagementMode) => void;
@@ -54,7 +57,7 @@ export function TerminalSwitcher({
 }) {
   const touch = usePointerCoarse();
   const panel = useRef<HTMLElement>(null);
-  const [filter, setFilter] = useState(() => contextKey(context));
+  const [filter, setFilter] = useState(() => context.projectId ? `project:${context.projectId}` : "no-project");
   const [filterOpen, setFilterOpen] = useState(false);
   const projects = new Map(
     scopes
@@ -83,7 +86,7 @@ export function TerminalSwitcher({
       ? "No project"
       : (projects.get(`project:${creationProject}`) ?? "Project unavailable");
   useEffect(() => {
-    setFilter(contextKey(context));
+    setFilter(context.projectId ? `project:${context.projectId}` : "no-project");
   }, [context.projectId]);
   useEffect(() => {
     if (!visible) setFilterOpen(false);
@@ -97,13 +100,13 @@ export function TerminalSwitcher({
     return index < 0 ? recentIds.length : index;
   };
   useEffect(() => {
-    if (!visible) return;
+    if (!visible || !focusSearch) return;
     const frame = requestAnimationFrame(() => {
       if (touch) panel.current?.focus({ preventScroll: true });
       else input.current?.focus();
     });
     return () => cancelAnimationFrame(frame);
-  }, [visible, touch]);
+  }, [visible, focusSearch, touch]);
   const shown = tabs
     .filter(
       (tab) =>
@@ -134,19 +137,14 @@ export function TerminalSwitcher({
     if (!ids.includes(highlighted)) setHighlighted(ids[0] ?? "");
   }, [shown, highlighted, query, busy]);
   return (
-    <div
-      className="bb-fg-switcher-scrim bb-fg-thread-search-scrim"
-      hidden={!visible}
-      inert={!visible}
-      onPointerDown={onDismiss}
-    >
-      <section
-        className="bb-fg-switcher bb-fg-thread-search"
+    <aside
+        id="bb-fg-terminal-sidebar"
         ref={panel}
+        className="bb-fg-terminal-sidebar bb-fg-thread-search"
+        hidden={!visible}
+        inert={!visible}
         tabIndex={-1}
-        role="dialog"
-        aria-label="Switch terminal"
-        onPointerDown={(event) => event.stopPropagation()}
+        aria-label="Terminal sidebar"
         onKeyDownCapture={(event) => {
           if (!event.currentTarget.contains(event.target as Node)) return;
           if (
@@ -165,7 +163,6 @@ export function TerminalSwitcher({
         onKeyDown={(event) => {
           // Portaled menus own their Escape and arrow keys.
           if (!event.currentTarget.contains(event.target as Node)) return;
-          containTab(event);
           if (event.key === "Escape") {
             event.preventDefault();
             event.stopPropagation();
@@ -175,9 +172,6 @@ export function TerminalSwitcher({
       >
         <div className="bb-fg-picker-heading">
           <div><strong>Terminals</strong></div>
-          <button type="button" className="bb-fg-picker-back" onClick={onDismiss} aria-label="Back to terminal">
-            <Icon name="X" className="size-4" />
-          </button>
         </div>
         <Command
           label="Search terminals"
@@ -248,13 +242,17 @@ export function TerminalSwitcher({
           </CommandList>
         </Command>
         <div className="bb-fg-picker-footer">
+          {onEnvironment ? <button type="button" className="bb-fg-sidebar-environment"
+            aria-label="Edit environment variables" onClick={onEnvironment}>
+            <Icon name="Variable" className="size-4" />
+            <span>Environment variables</span>
+          </button> : null}
           <button type="button" className="bb-fg-create-session" title={`New terminal in ${creationLabel}`} disabled={busy} onClick={() => onCreate(creationProject)}>
             <Icon name="Plus" className="size-4" />
             <span>{busy ? "Starting…" : "New terminal"}</span>
           </button>
         </div>
-      </section>
-    </div>
+    </aside>
   );
 }
 
@@ -286,6 +284,8 @@ function SessionRow({
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const trigger = useRef<HTMLButtonElement>(null);
+  const restoreMenuFocus = useRef(true);
+  const pendingFind = useRef(false);
   const highlighted = useCommandState(
     (state) => state.value === tab.terminalId,
   );
@@ -334,7 +334,10 @@ function SessionRow({
           {active ? <span className="bb-fg-current-dot" /> : null}
         </span>
       </CommandItem>
-      <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
+      <DropdownMenu open={menuOpen} onOpenChange={(open) => {
+        if (open) restoreMenuFocus.current = true;
+        setMenuOpen(open);
+      }}>
         <DropdownMenuTrigger asChild>
           <button
             ref={trigger}
@@ -361,12 +364,17 @@ function SessionRow({
           onKeyPress={isolateTerminalKey}
           onCloseAutoFocus={(event) => {
             event.preventDefault();
-            if (trigger.current?.closest("[hidden], [inert]") == null)
+            if (pendingFind.current) {
+              pendingFind.current = false;
+              requestAnimationFrame(() => onFind?.());
+              return;
+            }
+            if (restoreMenuFocus.current && trigger.current?.closest("[hidden], [inert]") == null)
               trigger.current?.focus();
           }}
         >
           {onFind ? (
-            <DropdownMenuItem onSelect={onFind}>
+            <DropdownMenuItem onSelect={() => { restoreMenuFocus.current = false; pendingFind.current = true; }}>
               Find in terminal
             </DropdownMenuItem>
           ) : null}
@@ -376,24 +384,24 @@ function SessionRow({
             </DropdownMenuItem>
           ) : null}
           {onFind || maximize ? <DropdownMenuSeparator /> : null}
-          <DropdownMenuItem onSelect={() => onManage(tab.terminalId, "rename")}>
+          <DropdownMenuItem onSelect={() => { restoreMenuFocus.current = false; onManage(tab.terminalId, "rename"); }}>
             Rename…
           </DropdownMenuItem>
           {ownerOf(tab.scopeKey).projectId !== null ? (
             <DropdownMenuItem
-              onSelect={() => onManage(tab.terminalId, "environment")}
+              onSelect={() => { restoreMenuFocus.current = false; onManage(tab.terminalId, "environment"); }}
             >
-              Project environment…
+              Environment variables…
             </DropdownMenuItem>
           ) : null}
           <DropdownMenuSeparator />
-          <DropdownMenuItem onSelect={() => onRestart(tab.terminalId)}>
+          <DropdownMenuItem onSelect={() => { restoreMenuFocus.current = false; onRestart(tab.terminalId); }}>
             Restart shell
           </DropdownMenuItem>
           <DropdownMenuSeparator />
           <DropdownMenuItem
             variant="destructive"
-            onSelect={() => onManage(tab.terminalId, "delete")}
+            onSelect={() => { restoreMenuFocus.current = false; onManage(tab.terminalId, "delete"); }}
           >
             Delete terminal…
           </DropdownMenuItem>

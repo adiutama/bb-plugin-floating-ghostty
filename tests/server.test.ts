@@ -471,7 +471,7 @@ it("keeps native shortcut override off by default and follows BB's configured sh
   expect(await enabled.call("terminalShortcuts", null)).toEqual([]);
 });
 
-it("binds worktree shells to their project and preserves launch context across reload and restart", async () => {
+it("binds shells to their worktree across reload and restart", async () => {
   const { call, harness, sessions } = await setup();
   const environment = {
     id: "one",
@@ -487,7 +487,7 @@ it("binds worktree shells to their project and preserves launch context across r
     cols: 80,
     rows: 24,
   })) as any;
-  expect(opened.scopeKey).toBe("project:A");
+  expect(opened.scopeKey).toBe("worktree:A:one");
   expect(harness.inspection.sdk.callsTo("terminals.create")).toHaveLength(1);
   expect(harness.inspection.sdk.callsTo("terminals.close")).toHaveLength(0);
   const reloaded = await harness.lifecycle.reload(plugin);
@@ -513,7 +513,7 @@ it("binds worktree shells to their project and preserves launch context across r
   )) as any;
   expect(afterReload.snapshot.tabs[0]).toMatchObject({
     terminalId: opened.terminalId,
-    scopeKey: "project:A",
+    scopeKey: "worktree:A:one",
     cwd: opened.cwd,
     hostName: "Local",
   });
@@ -522,7 +522,7 @@ it("binds worktree shells to their project and preserves launch context across r
     cols: 80,
     rows: 24,
   })) as any;
-  expect(restarted.scopeKey).toBe("project:A");
+  expect(restarted.scopeKey).toBe("worktree:A:one");
   expect(sdk.callsTo("terminals.create")[0]?.[0]).toMatchObject({
     scope: { kind: "environment", environmentId: "one" },
   });
@@ -627,12 +627,13 @@ it("separates pinned names from automatic shell/command titles and persists both
   ).rejects.toThrow();
 });
 
-it("normalizes legacy worktree owners while retaining their original restart destination", async () => {
+it.each([false, true])("recovers worktree ownership and restart destination (project-grouped: %s)", async (projectGrouped) => {
   const { call, open, harness, bb } = await setup();
   const { opened } = await open();
   const stored = (await bb.storage.kv.get("open-tabs")) as any[];
-  stored[0].scopeKey = "worktree:A:one";
-  delete stored[0].launchScopeKey;
+  stored[0].scopeKey = projectGrouped ? "project:A" : "worktree:A:one";
+  if (projectGrouped) stored[0].launchScopeKey = "worktree:A:one";
+  else delete stored[0].launchScopeKey;
   await bb.storage.kv.set("open-tabs", stored);
   harness.inspection.sdk.stub("environments.get", async () => ({
     id: "one",
@@ -645,14 +646,14 @@ it("normalizes legacy worktree owners while retaining their original restart des
   const now = Date.now();
   vi.spyOn(Date, "now").mockReturnValue(now + 60_000);
   const result = (await call("init", null)) as any;
-  expect(result.snapshot.tabs[0].scopeKey).toBe("project:A");
+  expect(result.snapshot.tabs[0].scopeKey).toBe("worktree:A:one");
   expect(harness.inspection.sdk.callsTo("terminals.close")).toHaveLength(0);
   const { restarted } = (await call("restartTab", {
     terminalId: opened.terminalId,
     cols: 80,
     rows: 24,
   })) as any;
-  expect(restarted.scopeKey).toBe("project:A");
+  expect(restarted.scopeKey).toBe("worktree:A:one");
   expect(
     harness.inspection.sdk.callsTo("terminals.create")[1]?.[0],
   ).toMatchObject({
@@ -706,7 +707,7 @@ it("retains metadata on transient inspection errors and only deletes after autho
   ).toEqual([]);
 });
 
-it("updates the displayed working directory without moving project ownership or the restart location", async () => {
+it("updates the displayed working directory without moving scope ownership or the restart location", async () => {
   const { call, open, harness } = await setup();
   const { opened } = await open();
   const result = (await call("setTabCwd", {
@@ -781,4 +782,81 @@ it("retries saved environment values after a host reconnects without injecting t
     input: { projectId: "A", entries: [{ key: "RECONNECT", value: "latest" }] },
   });
   expect(harness.inspection.sdk.callsTo("terminals.input")).toHaveLength(0);
+});
+
+it("isolates worktree variables, host refreshes, and revisions from the project", async () => {
+  const { call, harness, sessions } = await setup();
+  harness.inspection.sdk.stub("environments.get", async ({ environmentId }: { environmentId: string }) => ({
+    id: environmentId, projectId: "A", name: environmentId,
+    path: `/a/${environmentId}`, hostId: "local", status: "ready",
+  }));
+  await call("saveProjectEnvironment", { projectId: "A", text: "TOKEN=project", expectedRevision: 0 });
+  expect(await call("getProjectEnvironment", { projectId: "A", environmentId: "one" }))
+    .toEqual({ text: "", revision: 0 });
+  await call("saveProjectEnvironment", { projectId: "A", environmentId: "one", text: "TOKEN=one", expectedRevision: 0 });
+  const opened = await call("openTab", { scopeKey: "worktree:A:one", cols: 80, rows: 24 }) as any;
+  await call("openTab", { scopeKey: "worktree:A:two", cols: 80, rows: 24 });
+  expect(opened.opened.launchScopeKey).toBe("worktree:A:one");
+  const prepared = harness.inspection.experimental_hostRpcCalls.filter((call) => call.method === "prepareProjectEnvironment");
+  expect(prepared.slice(-2).map((call) => call.input)).toEqual([
+    { projectId: JSON.stringify(["A", "one"]), entries: [{ key: "TOKEN", value: "one" }] },
+    { projectId: JSON.stringify(["A", "two"]), entries: [] },
+  ]);
+  const before = prepared.length;
+  await call("saveProjectEnvironment", { projectId: "A", text: "TOKEN=updated", expectedRevision: 1 });
+  expect(harness.inspection.experimental_hostRpcCalls.filter((call) => call.method === "prepareProjectEnvironment")).toHaveLength(before);
+  await expect(call("saveProjectEnvironment", { projectId: "A", environmentId: "one", text: "TOKEN=stale", expectedRevision: 0 })).rejects.toThrow(/changed/);
+  await expect(call("getProjectEnvironment", { projectId: "B", environmentId: "one" })).rejects.toThrow(/no longer available/);
+  const reloaded = await harness.lifecycle.reload(plugin);
+  cleanups.push(() => reloaded.harness.lifecycle.dispose());
+  const sdk = reloaded.harness.inspection.sdk;
+  sdk.stub("hosts.list", async () => [{ id: "local", name: "Local", status: "connected" }]);
+  sdk.stub("projects.list", async () => []);
+  sdk.stub("environments.get", async ({ environmentId }: { environmentId: string }) => ({
+    id: environmentId, projectId: "A", name: environmentId,
+    path: `/a/${environmentId}`, hostId: "local", status: "ready",
+  }));
+  sdk.stub("terminals.get", async ({ terminalId }: { terminalId: string }) => sessions.get(terminalId));
+  const reloadedCall = reloaded.harness.behavior.callRpc;
+  expect(await reloadedCall("getProjectEnvironment", { projectId: "A", environmentId: "one" })).toEqual({ text: "TOKEN=one", revision: 1 });
+  const snapshot = await reloadedCall("init", null) as any;
+  expect(snapshot.snapshot.tabs.find((tab: any) => tab.terminalId === opened.opened.terminalId).launchScopeKey).toBe("worktree:A:one");
+});
+
+it("lists empty worktrees as copy destinations and keeps configured worktrees discoverable", async () => {
+  const { call, harness } = await setup();
+  harness.inspection.sdk.stub("projects.list", async () => [
+    { id: "A", name: "Alpha", sources: [], threads: [{ environmentId: "one" }] },
+    { id: "B", name: "Beta", sources: [], threads: [] },
+  ]);
+  harness.inspection.sdk.stub("environments.get", async ({ environmentId }: { environmentId: string }) => ({
+    id: environmentId, projectId: "A", name: environmentId,
+    path: `/a/${environmentId}`, hostId: "local", status: "ready",
+  }));
+  await call("saveProjectEnvironment", { projectId: "A", environmentId: "saved", text: "TOKEN=saved", expectedRevision: 0 });
+  const result = await call("listProjectEnvironments", { includeUnconfigured: true }) as any;
+  expect(result.projects.map(({ projectId, environmentId, keyCount }: any) => ({ projectId, environmentId, keyCount }))).toEqual([
+    { projectId: "A", environmentId: undefined, keyCount: 0 },
+    { projectId: "A", environmentId: "one", keyCount: 0 },
+    { projectId: "A", environmentId: "saved", keyCount: 1 },
+    { projectId: "B", environmentId: undefined, keyCount: 0 },
+  ]);
+  expect(JSON.stringify(result)).not.toContain("TOKEN=saved");
+});
+
+it("reuses an existing worktree shell and coalesces simultaneous automatic opens", async () => {
+  const { call, harness } = await setup();
+  harness.inspection.sdk.stub("environments.get", async ({ environmentId }: { environmentId: string }) => ({
+    id: environmentId, projectId: "A", name: environmentId,
+    path: `/a/${environmentId}`, hostId: "local", status: "ready",
+  }));
+  const input = { scopeKey: "worktree:A:one", reuseExisting: true, cols: 80, rows: 24 };
+  const results = await Promise.all([call("openTab", input), call("openTab", input)]) as any[];
+  expect(results[0].opened.terminalId).toBe(results[1].opened.terminalId);
+  expect((await call("openTab", input) as any).opened.terminalId).toBe(results[0].opened.terminalId);
+  expect(harness.inspection.sdk.callsTo("terminals.create")).toHaveLength(1);
+  const sibling = await call("openTab", { ...input, scopeKey: "worktree:A:two" }) as any;
+  expect(sibling.opened.terminalId).not.toBe(results[0].opened.terminalId);
+  await call("openTab", { ...input, reuseExisting: false });
+  expect(harness.inspection.sdk.callsTo("terminals.create")).toHaveLength(3);
 });

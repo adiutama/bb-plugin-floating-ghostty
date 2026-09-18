@@ -21,12 +21,12 @@ const tabs = [
   { terminalId: "current", scopeKey: "worktree:A:one" },
 ];
 describe("terminal context", () => {
-  it("makes every worktree in this project available, but excludes another project", () => {
+  it("makes only the current worktree available", () => {
     expect(
       tabs
         .filter((tab) => availableHere(tab.scopeKey, context))
         .map((tab) => tab.terminalId),
-    ).toEqual(["sibling", "project", "current"]);
+    ).toEqual(["current"]);
     expect(
       tabs
         .filter((tab) =>
@@ -39,13 +39,13 @@ describe("terminal context", () => {
         .map((tab) => tab.terminalId),
     ).toEqual(["global"]);
   });
-  it("selects recent terminals across worktrees within the same project", () => {
+  it("ignores remembered or recent terminals from other worktrees", () => {
     const pick = (list: typeof tabs) =>
       preferredTerminal(list, context, undefined, ["global", "sibling"]);
-    expect(pick(tabs)?.terminalId).toBe("sibling");
+    expect(pick(tabs)?.terminalId).toBe("current");
     expect(pick(tabs.slice(0, 2))).toBeUndefined();
     expect(preferredTerminal(tabs, context, "project", [])?.terminalId).toBe(
-      "project",
+      "current",
     );
     expect(
       preferredTerminal(tabs, context, "global", ["current"])?.terminalId,
@@ -54,8 +54,8 @@ describe("terminal context", () => {
       "current",
     );
   });
-  it("shares selection across a project's worktrees and labels projectless shells", () => {
-    expect(contextKey(context)).toBe(
+  it("keeps selection separate across worktrees and labels projectless shells", () => {
+    expect(contextKey(context)).not.toBe(
       contextKey({ ...context, environmentId: "two" }),
     );
     expect(scopeLabel("home:local", [])).toBe("No project");
@@ -83,4 +83,18 @@ describe("terminal context", () => {
     ];
     expect(preferredScope(scopes, context)?.key).toBe("worktree:A:one");
   });
+});
+
+it("does not reuse a default-checkout or sibling terminal when the worktree is empty", () => {
+  const otherTabs = tabs.filter((tab) => tab.terminalId !== "current");
+  expect(preferredTerminal(otherTabs, context, "sibling", ["project", "sibling"])).toBeUndefined();
+  expect(availableHere("project:A", { ...context, environmentId: null })).toBe(true);
+  expect(availableHere("worktree:A:one", { ...context, environmentId: null })).toBe(false);
+});
+
+it("never falls back to the default checkout when the worktree scope is missing", () => {
+  expect(preferredScope([{
+    key: "project:A", kind: "project", label: "Alpha", detail: "/a",
+    hostId: "local", hostName: "Local", online: true,
+  }], context)).toBeUndefined();
 });

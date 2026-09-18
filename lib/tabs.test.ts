@@ -247,3 +247,20 @@ it("updates a session's working directory even when its title and status are unc
   expect(after.tabs[0]?.cwd).toBe("/tmp/new-directory");
   expect(after.tabs[0]?.status).toBe(before.tabs[0]?.status);
 });
+
+it("keeps disconnected shells distinct from exited shells", () => {
+  const state = tabsReducer(emptyTabs, {
+    type: "synced",
+    snapshot: { revision: 1, tabs: [serverTab("offline", { status: "disconnected" })], activeTabId: "offline" },
+  });
+  expect(state.tabs[0]?.status).toBe("error");
+});
+
+it("accepts a confirmed exit from a snapshot for an existing shell", () => {
+  const state = synced(emptyTabs, 1, ["a"]);
+  const next = tabsReducer(state, {
+    type: "synced",
+    snapshot: { revision: 2, tabs: [serverTab("a", { status: "exited" })], activeTabId: "a" },
+  });
+  expect(next.tabs[0]?.status).toBe("exited");
+});

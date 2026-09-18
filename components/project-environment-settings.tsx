@@ -9,6 +9,8 @@ import { Input } from "./ui/input";
 interface ProjectEnvironmentSummary {
   id: string;
   name: string;
+  projectId?: string;
+  environmentId?: string;
   configured: boolean;
   keyCount: number;
   updatedAt: string | null;
@@ -41,7 +43,7 @@ export function ProjectEnvironmentSettings({
     setLoading(true);
     setError(null);
     try {
-      const result = await rpc.call("listProjectEnvironments", null);
+      const result = await rpc.call("listProjectEnvironments", { includeUnconfigured: true });
       setProjects(result.projects);
     } catch (error) {
       setError(
@@ -61,7 +63,6 @@ export function ProjectEnvironmentSettings({
   const visibleProjects = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase();
     return projects.filter((project) => {
-      if (!project.configured) return false;
       if (needle && !project.name.toLocaleLowerCase().includes(needle))
         return false;
       return true;
@@ -96,8 +97,8 @@ export function ProjectEnvironmentSettings({
       ) : visibleProjects.length === 0 ? (
         <p className="bb-fg-settings-status">
           {projects.length === 0
-            ? "No configured project environments."
-            : "No configured environments match your search."}
+            ? "No projects or worktrees available."
+            : "No environments match your search."}
         </p>
       ) : (
         <div className="bb-fg-project-environment-list">
@@ -108,6 +109,7 @@ export function ProjectEnvironmentSettings({
                 <div className="bb-fg-project-environment-copy">
                   <div className="bb-fg-project-environment-name">
                     <span>{project.name}</span>
+                    <Badge variant="secondary">{project.environmentId ? "Worktree" : "Default checkout"}</Badge>
                     <Badge variant="secondary">
                       {`${project.keyCount} variable${project.keyCount === 1 ? "" : "s"}`}
                     </Badge>
@@ -135,7 +137,8 @@ export function ProjectEnvironmentSettings({
       {selected ? (
         <ProjectEnvironmentManagement
           rpc={rpc}
-          projectId={selected.id}
+          projectId={selected.projectId ?? selected.id}
+          environmentId={selected.environmentId}
           projectLabel={selected.name}
           onDismiss={() => {
             setSelected(null);
