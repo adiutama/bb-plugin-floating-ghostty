@@ -1,3 +1,4 @@
+import { TerminalResetWriter } from "./terminal-reset";
 import { WTerm } from "@wterm/dom";
 import { GhosttyCore } from "@wterm/ghostty";
 import type { PluginRpcClient } from "@get-bb/plugin-sdk/app";
@@ -44,6 +45,7 @@ export interface PumpOptions {
 }
 
 export class TerminalPump {
+  private resetWriter = new TerminalResetWriter();
   private presentation: TerminalPresentation;
   private queryColors: { foreground: string | null; background: string | null } = { foreground: null, background: null };
   private terminal: WTerm | null = null;
@@ -144,12 +146,19 @@ export class TerminalPump {
     void this.initialize();
   }
 
-  private async initialize(): Promise<void> {
+  private async initialize(replacing = false): Promise<void> {
     try {
       const core = await loadCore();
       if (this.disposed) {
         core.dispose();
         return;
+      }
+      const dimensions = replacing && this.terminal
+        ? { cols: this.terminal.cols, rows: this.terminal.rows } : {};
+      if (replacing) {
+        this.terminal?.destroy();
+        this.core?.dispose();
+        this.clearSelectionSnapshot();
       }
       this.core = core;
       const response = core.getResponse.bind(core);
@@ -159,6 +168,7 @@ export class TerminalPump {
       }) ?? null;
       const terminal = new WTerm(this.options.container, {
         core,
+        ...dimensions,
         // Keep Wterm's cell-metric updates for selection and scrolling.
         // Its competing grid resize is gated below; the pump owns sizing.
         autoResize: true,
@@ -211,6 +221,10 @@ export class TerminalPump {
         .catch(() => {});
     } catch (error) {
       if (this.disposed) return;
+      if (replacing) {
+        this.replayPending = true;
+        throw error;
+      }
       this.setStatus(
         "error",
         error instanceof Error ? error.message : "Ghostty failed to load",
@@ -320,12 +334,24 @@ export class TerminalPump {
     );
   }
 
-  private writeOutput(bytes: Uint8Array, replay: boolean): void {
+  private async writeOutput(bytes: Uint8Array, replay: boolean): Promise<void> {
     this.titleObserver.consume(bytes);
-    this.presentation.consume(bytes);
     if (replay) this.replayWrites++;
     try {
-      this.terminal?.write(bytes);
+      const parts: Array<Uint8Array | null> = [];
+      this.resetWriter.write(bytes, (part) => parts.push(part), () => parts.push(null));
+      for (const part of parts) {
+        if (this.disposed) return;
+        // Repeated RIS in Wterm 0.5 can resurrect cleared pages on resize.
+        // A fresh WASM instance avoids reusing that corrupted allocator state.
+        if (part === null) {
+          await this.initialize(true);
+          this.presentation.reset();
+        } else {
+          this.presentation.consume(part);
+          this.terminal?.write(part);
+        }
+      }
     } finally {
       if (replay) this.replayWrites--;
     }
@@ -537,7 +563,7 @@ export class TerminalPump {
         next = "replay";
       } else {
         for (const chunk of result.chunks) {
-          this.writeOutput(base64ToBytes(chunk.dataBase64), false);
+          await this.writeOutput(base64ToBytes(chunk.dataBase64), false);
         }
         this.nextSeq = result.nextSeq;
 
@@ -601,10 +627,11 @@ export class TerminalPump {
         attach: true,
       });
       if (!this.disposed) {
+        this.resetWriter = new TerminalResetWriter();
+        await this.initialize(true);
         this.presentation.reset();
-        this.terminal?.write("\x1bc");
         for (const chunk of result.chunks) {
-          this.writeOutput(base64ToBytes(chunk.dataBase64), !result.respondToQueries);
+          await this.writeOutput(base64ToBytes(chunk.dataBase64), !result.respondToQueries);
         }
         this.nextSeq = result.nextSeq;
         this.replayPending = false;

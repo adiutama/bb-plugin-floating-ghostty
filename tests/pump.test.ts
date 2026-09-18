@@ -709,3 +709,56 @@ it("keeps idle prompt cells through row-only resizing", async () => {
     expect(container.textContent, `rows ${rows}`).toContain("prompt>");
   }
 });
+
+it("renders retained JSON logs without mixing older line tails into newer rows", async () => {
+  const logs = Array.from({ length: 1500 }, (_, i) =>
+    JSON.stringify({ time: `event-${i}`, level: "info", event: "worker.completed", message: "x".repeat(i % 180) }) + "\r\n",
+  ).join("");
+  const { pump, container } = fixture(logs);
+  await vi.waitFor(() => expect(container.textContent).toContain("event-1499"));
+  const core = (pump as any).core as GhosttyCore;
+  const check = () => {
+    const rows = Array.from(container.querySelectorAll(".term-row:not(.term-scrollback-row)"));
+    expect(rows).toHaveLength(core.getRows());
+    for (let row = 0; row < core.getRows(); row++) {
+      const expected = Array.from({length: core.getCols()}, (_, col) => {
+        const cell = core.getCell(row, col);
+        return cell.width === 0 ? "" : cell.chars ?? String.fromCodePoint(cell.char || 32);
+      }).join("");
+      expect(rows[row].textContent, `row ${row}`).toBe(expected);
+    }
+  };
+  check();
+  for (const [cols, rows] of [[160,40],[60,20],[120,35],[80,24]]) {
+    (pump as any).fitting = true;
+    (pump as any).terminal.resize(cols, rows);
+    (pump as any).fitting = false;
+    await new Promise(resolve => setTimeout(resolve, 40));
+    check();
+  }
+});
+
+it.each([false, true])("does not resurrect cleared logs after repeated full resets and a resize (split=%s)", async (split) => {
+  const old = Array.from({ length: 1000 }, (_, i) =>
+    "OLD" + "x".repeat(i % 180) + "\r\n",
+  ).join("");
+  const beforeReset = "\x1bc" + old + "\x1b";
+  const afterReset = "c" + "new\r\n".repeat(15);
+  const chunks = (split ? [beforeReset, afterReset] : [beforeReset + afterReset])
+    .map((text, index) => ({ seq: index + 1, dataBase64: btoa(text) }));
+  const { pump, container } = createPump(vi.fn(async (method: string, input: Record<string, unknown>) =>
+    method === "read" ? { ...output("", chunks.length), chunks: input.replay ? chunks : [] } : { ok: true },
+  ));
+  await vi.waitFor(() => expect(container.textContent).toContain("new"));
+  const terminal = (pump as any).terminal;
+  (pump as any).fitting = true;
+  terminal.resize(81, 24);
+  (pump as any).fitting = false;
+  await vi.waitFor(() => {
+    const rows = Array.from(container.querySelectorAll(".term-row:not(.term-scrollback-row)"));
+    expect(rows).toHaveLength(24);
+    for (let row = 0; row < 24; row++) {
+      expect(rows[row].textContent?.trimEnd(), `row ${row}`).toBe(row < 15 ? "new" : "");
+    }
+  });
+});
