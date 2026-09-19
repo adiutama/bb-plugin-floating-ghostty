@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
+import { readFileSync } from "node:fs";
 import { afterEach, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render } from "@testing-library/react";
+import { cleanup, fireEvent, render, within } from "@testing-library/react";
 import { useState } from "react";
 import { EnvironmentVariableEditor, serializeVariables, type VariableTexts } from "../components/environment-variable-editor";
 import { parseProjectEnvironment } from "../lib/project-environment";
@@ -10,19 +11,19 @@ vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect()
 afterEach(cleanup);
 function Editor() {
   const [texts, setTexts] = useState<VariableTexts>({ global: "", project: "", worktree: 'TOKEN="secret"' });
-  return <><EnvironmentVariableEditor texts={texts} onChange={setTexts} scopes={["global", "project", "worktree"]} defaultScope="worktree" disabled={false} label="Test" /><output data-testid="saved">{texts.worktree}</output></>;
+  return <><EnvironmentVariableEditor texts={texts} onChange={setTexts} scopes={["global", "project", "worktree"]} defaultScope="worktree" disabled={false} label="Test" onCopyFrom={() => {}} /><output data-testid="saved">{texts.worktree}</output></>;
 }
-it("edits masked rows, reveals values, adds and removes variables", () => {
+it("shows values and adds and removes variables", () => {
   const view = render(<Editor />);
-  expect(view.getByLabelText("Value 1").getAttribute("type")).toBe("password");
-  fireEvent.click(view.getByLabelText("Show value 1"));
+  expect(view.getByRole("textbox", { name: "Value 1" })).toHaveProperty("value", "secret");
   fireEvent.change(view.getByLabelText("Value 1"), { target: { value: "new\nvalue" } });
   fireEvent.click(view.getByText("Add variable"));
   fireEvent.change(view.getByLabelText("Key 2"), { target: { value: "EMPTY" } });
   expect(parseProjectEnvironment(view.getByTestId("saved").textContent!)).toEqual([
     { key: "TOKEN", value: "new\nvalue" }, { key: "EMPTY", value: "" },
   ]);
-  fireEvent.click(view.getByLabelText("Remove variable 1"));
+  fireEvent.keyDown(view.getByRole("button", { name: "Actions for variable 1" }), { key: "Enter" });
+  fireEvent.click(within(document.body).getByRole("menuitem", { name: "Delete variable" }));
   expect(parseProjectEnvironment(view.getByTestId("saved").textContent!)).toEqual([{ key: "EMPTY", value: "" }]);
 });
 it("bulk pastes dotenv and rejects duplicates without losing edits", () => {
@@ -69,4 +70,20 @@ it("toggles a definition without losing its value and restores the toggle after 
   fireEvent.click(loaded.getByRole("switch", { name: "Variable 1 enabled" }));
   expect(loaded.getByLabelText("Value 1")).toHaveProperty("value", "secret");
   expect(loaded.getByRole("switch", { name: "Variable 1 enabled" })).toHaveProperty("checked", true);
+});
+
+it.each(["Variable actions", "Actions for variable 1"])("renders %s above the floating terminal", (name) => {
+  // Exercise the portal's actual layer selectors against the floating window.
+  const css = readFileSync("styles.css", "utf8");
+  const style = document.createElement("style");
+  style.textContent = ".z-50 { z-index: 50; }" + ["bb-fg-window", "bb-fg-actions-menu", "bb-fg-environment-menu"].map(selector => css.match(new RegExp(`\\.${selector} \\{[^}]*z-index:[^}]*\\}`))?.[0] ?? "").join("\n");
+  document.head.append(style);
+  try {
+    const view = render(<div className="bb-fg-window"><Editor /></div>);
+    fireEvent.keyDown(view.getByRole("button", { name }), { key: "Enter" });
+    const menu = within(document.body).getByRole("menu");
+    const window = view.container.querySelector(".bb-fg-window")!;
+    expect(Number(getComputedStyle(menu).zIndex)).toBeGreaterThan(Number(getComputedStyle(window).zIndex));
+    expect(Number(getComputedStyle(menu).zIndex)).toBeGreaterThan(70); // Settings dialog layer.
+  } finally { style.remove(); }
 });

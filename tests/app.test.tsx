@@ -913,13 +913,11 @@ it("edits the environment belonging to a worktree terminal", async () => {
         ).getByText("Environment variables…"),
       ),
     );
-    await act(async () => fireEvent.keyDown(await slot.findByRole("button", { name: "Variable actions" }), { key: "Enter" }));
-    await act(async () => fireEvent.click(within(document.body).getByRole("menuitem", { name: "Edit as .env" })));
     const editor = await slot.findByRole("textbox", {
-      name: "Environment variables for Project A / one",
+      name: "Value 3",
     });
-    expect((editor as HTMLTextAreaElement).value).toBe("TOKEN=existing");
-    fireEvent.change(editor, { target: { value: "TOKEN=updated" } });
+    expect((editor as HTMLTextAreaElement).value).toBe("existing");
+    fireEvent.change(editor, { target: { value: "updated" } });
     await act(async () =>
       fireEvent.click(slot.getByRole("button", { name: "Save" })),
     );
@@ -931,7 +929,7 @@ it("edits the environment belonging to a worktree terminal", async () => {
       {
         projectId: "A",
         environmentId: "one",
-        layers: [{ scope: "worktree", text: "TOKEN=updated", expectedRevision: 2 }],
+        layers: [{ scope: "worktree", text: 'TOKEN="updated"', expectedRevision: 2 }],
       },
     ]);
   } finally {

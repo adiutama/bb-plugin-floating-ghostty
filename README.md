@@ -65,14 +65,12 @@ is selected, or the window hides when no shell remains in the current worktree.
 **Environment variables** in the sidebar footer replaces the shell viewport with the active terminal’s environment editor. The sidebar stays available, and the shell remains mounted and running. Use **Cancel** or select a sidebar terminal to return. In plugin settings, the editor remains a dialog.
 Each project session’s **⋯** menu also provides **Environment variables…** alongside
 **Rename…**, **Restart shell**, and **Delete terminal…**. The environment editor
-provides key/value rows with masked values, reveal and remove controls, and bulk .env paste into a key field. The **⋯** menu holds **Edit as .env**, **Copy to…**, and **Clear**. Every definition appears in one list with its own scope selector; **Add variable** creates a new row. It accepts strict dotenv assignments and applies them at the next prompt in zsh,
+provides key/value rows with always-visible values and remove controls, and bulk .env paste into a key field. The editor **⋯** menu holds **Copy from…** and, when there are unsaved changes, **Discard edits**. Each row’s **⋯** menu holds **Copy to…** and **Delete variable**. Every definition appears in one list with its own scope selector; **Add variable** creates a new row. It accepts strict dotenv assignments and applies them at the next prompt in zsh,
 bash, and fish. Each row selects Global (all terminals), Project (the default checkout and all its worktrees), or Worktree (only this worktree). The same key may appear in multiple scopes; duplicate keys within one scope are rejected. All definitions remain visible, with overridden rows muted. Add the same key in a more specific scope to override it. Changing scope moves the definition; deleting it restores the next inherited value. Save validates all changed scopes and writes them in one transaction, rejecting the entire batch if any revision is stale. An empty value is an explicit override. Existing
 project records now apply to all their worktrees. Running commands keep their
 current environment; updates apply at the next prompt. Older projectless shells
 need a restart to pick up global variables. Settings lists projects and worktrees,
-including empty environments. Use **Copy to…**, select the source scope and destination, then
-**Review copy** to edit the copied variables before saving. Saving replaces the
-destination’s variables; the source is unchanged and future edits are independent.
+including empty environments. **Copy from…** starts in the current project: choose a source worktree (or switch projects), select keys, and add them to the current scope as drafts. **Copy to…** sends one row to a destination review. Both preserve unrelated definitions and default same-scope conflicts to **Keep existing**, with an explicit **Replace** choice. Copies are independent and persist only after **Save**.
 Managing another session leaves your current shell selected.
 Closing a management dialog returns to the selector with its search and filter
 preserved. Deletion asks for
@@ -187,7 +185,7 @@ registration with the BB frontend harness.
 - Each row has an enable switch. Disabled definitions retain their value and scope but are excluded from shell resolution; enabled ancestors can take effect.
 - Raw dotenv represents disabled definitions as `# @bb-disabled KEY="value"`; ordinary comments remain ignored. Copy and scope moves preserve this state. Duplicate keys in one scope remain invalid even when disabled.
 - Clearing local variables restores inherited values; explicit empty values override them.
-- Copy transfers local definitions only, leaving inheritance and destination review intact.
+- Copy from shows only worktree definitions within the same project. Across projects it also includes effective project definitions. Global values are always excluded because they are already shared. Source worktrees without their own enabled definitions are hidden, even across projects. Inherited project values remain available through the project-scope source; empty worktrees remain available as copy destinations. Copy to transfers the selected definition, including its enabled state. Both merge into the destination context scope, preserve unrelated keys, require explicit conflict replacement, and remain drafts until Save.
 - Global values also apply to projectless terminals.
 
 ### Worktree ownership contract

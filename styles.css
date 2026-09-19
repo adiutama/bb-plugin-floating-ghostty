@@ -1002,28 +1002,6 @@
 }
 @keyframes bb-fg-cursor-blink { 50% { opacity: 0; } }
 
-.bb-fg-environment-copy-panel {
-  display: grid;
-  gap: 8px;
-  margin: 12px 16px;
-  padding: 12px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--muted);
-  font-size: 12px;
-}
-.bb-fg-environment-copy-panel select {
-  width: 100%;
-  min-width: 0;
-  padding: 8px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--background);
-  color: var(--foreground);
-}
-.bb-fg-environment-copy-panel .bb-fg-management-note { margin: 0; padding: 0; }
-.bb-fg-environment-copy-panel button { justify-self: end; }
-
 /* Attached navigation: one quiet surface, using BB's theme tokens. */
 .bb-fg-workspace {
   container-type: inline-size;
@@ -1113,9 +1091,7 @@
 .bb-fg-env-row input, .bb-fg-env-row textarea { width: 100%; margin: 0; min-width: 0; min-height: 36px; height: 36px; padding: 8px 10px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 18px; }
 .bb-fg-env-row input::placeholder { color: var(--muted-foreground); opacity: .65; }
 .bb-fg-env-value { position: relative; min-width: 0; }
-.bb-fg-env-value input, .bb-fg-env-value textarea { padding-right: 36px; }
 .bb-fg-env-value textarea { resize: vertical; }
-.bb-fg-env-value button { position: absolute; top: 3px; right: 3px; width: 30px; height: 30px; display: grid; place-items: center; color: var(--muted-foreground); border-radius: 4px; }
 .bb-fg-env-remove { display: grid; place-items: center; width: 28px; height: 36px; color: var(--muted-foreground); border-radius: 5px; }
 .bb-fg-env-add { display: inline-flex; align-items: center; gap: 6px; margin-top: 12px; padding: 6px 9px; border: 1px solid var(--border); border-radius: 5px; font-size: 12px; }
 .bb-fg-env-hint { margin: 12px 0 4px; color: var(--muted-foreground); font-size: 11px; }
@@ -1139,9 +1115,8 @@
 .bb-fg-env-add { border: 0; padding: 6px 0; color: var(--muted-foreground); }
 /* Scope belongs to each definition, including duplicate keys across scopes. */
 .bb-fg-env-columns, .bb-fg-env-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) 96px 28px; }
-.bb-fg-env-row select, .bb-fg-env-raw-scope { min-width: 0; height: 36px; padding: 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--background); color: var(--foreground); font-size: 11px; }
+.bb-fg-env-row select { min-width: 0; height: 36px; padding: 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--background); color: var(--foreground); font-size: 11px; }
 .bb-fg-env-row[data-shadowed="true"] > input:not(.bb-fg-env-toggle) { color: var(--muted-foreground); }
-.bb-fg-env-raw-scope { margin-bottom: 10px; text-transform: capitalize; }
 @media (max-width: 480px) {
   .bb-fg-env-columns { display: none; }
   .bb-fg-env-row { grid-template-columns: minmax(0, 1fr) 100px 28px; }
@@ -1192,3 +1167,25 @@
 .bb-fg-env-row input:not(.bb-fg-env-toggle):focus,
 .bb-fg-env-row textarea:focus,
 .bb-fg-env-row select:focus { outline: none; border-color: var(--ring); box-shadow: inset 0 0 0 1px var(--ring); }
+
+.bb-fg-copy-picker { padding: 8px 16px 20px; min-height: 0; overflow: auto; }
+.bb-fg-environment-pane .bb-fg-copy-picker { flex: 1; padding: 8px 24px 24px; }
+.bb-fg-copy-selectors { display: grid; grid-template-columns: 1fr 1.5fr; gap: 12px; margin-bottom: 20px; }
+.bb-fg-copy-selectors label { display: grid; gap: 6px; font-size: 12px; color: var(--muted-foreground); }
+.bb-fg-copy-picker select { min-width: 0; padding: 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--background); color: var(--foreground); font-size: 12px; }
+.bb-fg-copy-variables { display: grid; gap: 8px; }
+.bb-fg-copy-variable { display: grid; grid-template-columns: 1fr 1fr 130px; gap: 12px; align-items: center; min-width: 0; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
+.bb-fg-copy-variable label { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.bb-fg-copy-variable input[type="checkbox"] { width: 14px; height: 14px; margin: 0; padding: 0; flex-shrink: 0; accent-color: var(--primary); }
+.bb-fg-copy-variable code, .bb-fg-copy-value { overflow-wrap: anywhere; min-width: 0; white-space: pre-wrap; }
+.bb-fg-copy-variable small { color: var(--muted-foreground); text-transform: capitalize; }
+.bb-fg-copy-apply { padding: 8px 12px; margin-top: 12px; border: 1px solid var(--border); border-radius: 6px; font-size: 12px; }
+@media (max-width: 480px) {
+  .bb-fg-copy-selectors { grid-template-columns: 1fr; }
+  .bb-fg-copy-variable { grid-template-columns: minmax(0, 1fr) 120px; }
+  .bb-fg-copy-value { grid-column: 1; grid-row: 2; }
+}
+.bb-fg-copy-variable .bb-fg-copy-existing { display: block; margin-top: 5px; text-transform: none; }
+
+/* Environment menus are portaled above both the terminal (55) and settings editor (70). */
+.bb-fg-environment-menu { z-index: 80; }

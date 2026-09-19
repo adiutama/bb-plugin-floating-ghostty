@@ -26,8 +26,7 @@ from the sidebar footer. Each session’s **⋯** menu lets you
 rename, restart, delete, or edit its environment variables.
 
 Environment variables inherit from Global → Project → Worktree, with the most specific value winning. Each row selects its scope; same-key definitions across scopes stay visible. Add a more specific definition to override, or change scope to move a definition. Saves are atomic across changed scopes. Removing an override restores the inherited value at the next prompt.
-Settings lists projects and worktrees, including empty environments. **Copy to…**
-lets you choose another project or worktree and review the variables before saving.
+Settings lists projects and worktrees, including empty environments. The editor menu’s **Copy from…** browses source worktrees and selected effective keys. Each row’s **Copy to…** reviews that definition at a destination. Both preserve unrelated keys, default conflicts to Keep existing, and save only after review.
 Copies are independent. Names follow the shell and running command unless pinned.
 Exited shells close silently; the window selects another live shell in the current
 worktree or hides if none remain. Disconnected shells stay available for reconnection.
