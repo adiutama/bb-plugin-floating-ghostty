@@ -46,3 +46,11 @@ describe("project environment parser", () => {
     ).toBe("export TOKEN='a'\"'\"'b $(echo nope)'\n");
   });
 });
+
+it("retains disabled definitions, validates their keys, and excludes them from shell exports", () => {
+  const entries = parseProjectEnvironment('# ordinary comment\n# @bb-disabled TOKEN="first\\nsecond"\nLIVE=yes');
+  expect(entries).toEqual([{ key: "TOKEN", value: "first\nsecond", enabled: false }, { key: "LIVE", value: "yes" }]);
+  expect(environmentExportScript(entries)).toBe("export LIVE='yes'\n");
+  expect(() => parseProjectEnvironment('# @bb-disabled TOKEN=off\nTOKEN=on')).toThrow(/assigned more than once/);
+  expect(() => parseProjectEnvironment('# @bb-disabled 1BAD=value')).toThrow(/expected an environment variable name/);
+});

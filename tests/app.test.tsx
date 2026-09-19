@@ -280,11 +280,8 @@ async function setup(
           },
         ],
         getProjectEnvironment: () => projectEnvironment,
-        saveProjectEnvironment: (input: unknown) => {
-          const value = input as {
-            text: string;
-            expectedRevision: number;
-          };
+        saveEnvironmentDefinitions: (input: unknown) => {
+          const value = (input as { layers: { text: string; expectedRevision: number }[] }).layers[0]!;
           projectEnvironment = {
             text: value.text,
             revision: value.text === "" ? 0 : value.expectedRevision + 1,
@@ -916,6 +913,8 @@ it("edits the environment belonging to a worktree terminal", async () => {
         ).getByText("Environment variables…"),
       ),
     );
+    await act(async () => fireEvent.keyDown(await slot.findByRole("button", { name: "Variable actions" }), { key: "Enter" }));
+    await act(async () => fireEvent.click(within(document.body).getByRole("menuitem", { name: "Edit as .env" })));
     const editor = await slot.findByRole("textbox", {
       name: "Environment variables for Project A / one",
     });
@@ -926,14 +925,13 @@ it("edits the environment belonging to a worktree terminal", async () => {
     );
     expect(
       slot.inspection.rpcCalls
-        .filter((call) => call.method === "saveProjectEnvironment")
+        .filter((call) => call.method === "saveEnvironmentDefinitions")
         .map((call) => call.input),
     ).toEqual([
       {
         projectId: "A",
         environmentId: "one",
-        text: "TOKEN=updated",
-        expectedRevision: 2,
+        layers: [{ scope: "worktree", text: "TOKEN=updated", expectedRevision: 2 }],
       },
     ]);
   } finally {
@@ -945,20 +943,30 @@ it("opens the current worktree environment from the attached sidebar", async () 
   const slot = await setup([tab("current", "worktree:A:one")]);
   try {
     await act(async () => toggle());
-    await slot.findByRole("textbox", { name: "Shell current" });
+    const shell = await slot.findByRole("textbox", { name: "Shell current" });
     expect(slot.queryByRole("button", { name: "Edit environment variables" })).toBeNull();
     await act(async () => fireEvent.click(slot.getByRole("button", { name: "Show terminal sidebar" })));
     const sidebar = slot.getByRole("complementary", { name: "Terminal sidebar" });
     expect(sidebar.parentElement?.classList.contains("bb-fg-workspace")).toBe(true);
     expect(slot.container.querySelector(".bb-fg-thread-search-scrim")).toBeNull();
     await act(async () => fireEvent.click(within(sidebar).getByRole("button", { name: "Edit environment variables" })));
-    await slot.findByRole("textbox", { name: "Environment variables for Project A / one" });
-    const dialog = slot.getByRole("dialog", { name: "Environment variables" });
-    await act(async () => fireEvent.keyDown(dialog, { key: "Escape" }));
+    await slot.findByRole("textbox", { name: "Key 1" });
+    const panel = slot.getByRole("region", { name: "Environment variables" });
+    expect(panel.closest(".bb-fg-terminal-body")).not.toBeNull();
+    expect(within(panel).queryByRole("button", { name: "Back to terminal" })).toBeNull();
     expect(slot.queryByRole("dialog", { name: "Environment variables" })).toBeNull();
+    expect(slot.queryByRole("textbox", { name: "Shell current" })).toBeNull();
+    expect(shell.isConnected).toBe(true);
     expect(slot.getByRole("complementary", { name: "Terminal sidebar" })).toBe(sidebar);
+    await act(async () => fireEvent.click(within(panel).getByRole("button", { name: "Cancel" })));
+    expect(slot.getByRole("textbox", { name: "Shell current" })).toBe(shell);
+    await act(async () => fireEvent.click(within(sidebar).getByRole("button", { name: "Edit environment variables" })));
+    await slot.findByRole("region", { name: "Environment variables" });
+    await act(async () => fireEvent.click(within(sidebar).getByRole("option", { name: /current.*Current terminal/ })));
+    expect(slot.queryByRole("region", { name: "Environment variables" })).toBeNull();
+    expect(slot.getByRole("textbox", { name: "Shell current" })).toBe(shell);
   } finally { slot.lifecycle.unmount(); }
-});
+}, 30000);
 
 it("manages a filtered inactive terminal without changing shells and preserves the selector on return", async () => {
   const slot = await setup([

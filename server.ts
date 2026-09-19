@@ -23,6 +23,7 @@ import { join } from "node:path";
 //     applied, so a slow `init` can never resurrect a closed tab or drop a
 //     freshly opened one just because it started earlier.
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
+import { GLOBAL_ENVIRONMENT_KEY, environmentAncestors, resolveEnvironment } from "./lib/environment-inheritance";
 import { ownerOf } from "./lib/context";
 import { shellStartCommand } from "./lib/shell-integration";
 import { BB_TERMINAL_FONT_SIZE } from "./lib/theme";
@@ -112,9 +113,9 @@ export const rpcContract = defineRpcContract({
     output: z.array(shortcutSchema),
   },
   getProjectEnvironment: {
-    input: z.object({ projectId: projectIdSchema, environmentId: projectIdSchema.optional() }).strict(),
+    input: z.object({ projectId: projectIdSchema, environmentId: projectIdSchema.optional(), scope: z.literal("global").optional() }).strict(),
     output: z
-      .object({ text: z.string(), revision: z.number().int().min(0) })
+      .object({ text: z.string(), revision: z.number().int().min(0), inherited: z.array(z.object({ key: z.string(), value: z.string(), source: z.enum(["global", "project", "worktree"]) })).optional() })
       .strict(),
   },
   listProjectEnvironments: {
@@ -135,11 +136,24 @@ export const rpcContract = defineRpcContract({
       ),
     }),
   },
+  saveEnvironmentDefinitions: {
+    input: z.object({
+      projectId: projectIdSchema,
+      environmentId: projectIdSchema.optional(),
+      layers: z.array(z.object({
+        scope: z.enum(["global", "project", "worktree"]),
+        text: z.string().max(PROJECT_ENVIRONMENT_MAX_BYTES),
+        expectedRevision: z.number().int().min(0),
+      }).strict()).min(1).max(3),
+    }).strict(),
+    output: z.object({ keyCount: z.number(), pendingHosts: z.number().optional() }).strict(),
+  },
   saveProjectEnvironment: {
     input: z
       .object({
         projectId: projectIdSchema,
         environmentId: projectIdSchema.optional(),
+        scope: z.literal("global").optional(),
         text: z.string().max(PROJECT_ENVIRONMENT_MAX_BYTES),
         expectedRevision: z.number().int().min(0),
       })
@@ -948,21 +962,21 @@ export default async function plugin(bb: BbPluginApi) {
     return scope;
   }
 
-  // Preserve legacy default-checkout records and host paths; worktrees use a
-  // separate identity for storage, refresh tracking, and private host files.
+  // Keep project records and host paths stable. Worktree records contain only
+  // overrides; their private host files contain the resolved inherited values.
   function environmentKey(projectId: string, environmentId?: string | null): string {
     return environmentId ? JSON.stringify([projectId, environmentId]) : projectId;
   }
   function tabEnvironmentKey(tab: StoredTab): string | null {
     const owner = ownerOf(tab.launchScopeKey ?? tab.scopeKey);
-    return owner.projectId ? environmentKey(owner.projectId, owner.environmentId) : null;
+    return owner.projectId ? environmentKey(owner.projectId, owner.environmentId) : GLOBAL_ENVIRONMENT_KEY;
   }
   async function validateEnvironment(projectId: string, environmentId?: string) {
     if (environmentId) await worktreeScope(projectId, environmentId);
   }
 
   const environmentHosts = new Map<string, Set<string>>();
-  const appliedEnvironments = new Map<string, number>();
+  const appliedEnvironments = new Map<string, string>();
   const environmentRetries = new Map<string, number>();
   const environmentInFlight = new Set<string>();
   const environmentHostKey = (projectId: string, hostId: string) => JSON.stringify([projectId, hostId]);
@@ -974,16 +988,16 @@ export default async function plugin(bb: BbPluginApi) {
     const hostId = tab.hostId;
     if (!projectId || !hostId) return;
     const key = environmentHostKey(projectId, hostId);
-    const revision = getStoredEnvironment(projectId)?.revision ?? 0;
+    const revision = resolveEnvironment(projectId, getStoredEnvironment).revision;
     if (appliedEnvironments.get(key) === revision || environmentInFlight.has(key) ||
         Date.now() < (environmentRetries.get(key) ?? 0)) return;
     environmentInFlight.add(key);
     void serializeEnvironment(async () => {
-      const stored = getStoredEnvironment(projectId);
+      const effective = resolveEnvironment(projectId, getStoredEnvironment);
       await host.call("prepareProjectEnvironment", {
-        projectId, entries: parseProjectEnvironment(stored?.text ?? ""),
+        projectId, entries: effective.entries.map(({ key, value }) => ({ key, value })),
       }, { hostId });
-      appliedEnvironments.set(key, stored?.revision ?? 0);
+      appliedEnvironments.set(key, effective.revision);
       environmentRetries.delete(key);
     }).catch(() => {
       environmentRetries.set(key, Date.now() + 5000);
@@ -1005,19 +1019,19 @@ export default async function plugin(bb: BbPluginApi) {
   ): Promise<Tab> {
     let environmentFile: string | null = null;
     const owner = ownerOf(scope.key);
-    const projectId = owner.projectId ? environmentKey(owner.projectId, owner.environmentId) : null;
+    const projectId = owner.projectId ? environmentKey(owner.projectId, owner.environmentId) : GLOBAL_ENVIRONMENT_KEY;
     if (projectId !== null) {
       const prepared = await serializeEnvironment(async () => {
         const hosts = environmentHosts.get(projectId) ?? new Set<string>();
         hosts.add(scope.hostId);
         environmentHosts.set(projectId, hosts);
-        const stored = getStoredEnvironment(projectId);
+        const effective = resolveEnvironment(projectId, getStoredEnvironment);
         const prepared = await host.call(
           "prepareProjectEnvironment",
-          { projectId, entries: parseProjectEnvironment(stored?.text ?? "") },
+          { projectId, entries: effective.entries.map(({ key, value }) => ({ key, value })) },
           { hostId: scope.hostId },
         );
-        appliedEnvironments.set(environmentHostKey(projectId, scope.hostId), stored?.revision ?? 0);
+        appliedEnvironments.set(environmentHostKey(projectId, scope.hostId), effective.revision);
         return prepared;
       });
       environmentFile = prepared.path;
@@ -1083,6 +1097,52 @@ export default async function plugin(bb: BbPluginApi) {
 
   const pendingWorktreeOpens = new Map<string, ReturnType<typeof openSession>>();
 
+  async function saveEnvironmentLayers(changes: { key: string; text: string; expectedRevision: number }[]) {
+    if (new Set(changes.map(change => change.key)).size !== changes.length) throw new Error("Each scope may only be saved once.");
+    const keyCount = changes.reduce((count, change) => count + parseProjectEnvironment(change.text).length, 0);
+    return serializeEnvironment(async () => {
+      const stored = getStoredEnvironments();
+      for (const change of changes) {
+        const revision = stored[change.key]?.revision ?? 0;
+        if (revision !== change.expectedRevision) throw new Error("This environment changed in another window. Reopen it and try again.");
+        if (change.text === "" && revision === 0) continue;
+        stored[change.key] = { text: change.text, revision: revision + 1, updatedAt: new Date().toISOString() };
+      }
+      if (new TextEncoder().encode(JSON.stringify({ version: 1, projects: stored })).byteLength > PROJECT_ENVIRONMENT_VAULT_MAX_BYTES) throw new Error("The project environment vault is full.");
+      environmentDatabase.transaction(() => {
+        for (const change of changes) {
+          const next = stored[change.key];
+          if (next) upsertEnvironment.run(change.key, next.text, next.revision, next.updatedAt);
+        }
+      })();
+      await secureEnvironmentDatabaseFiles();
+      const affected = new Map<string, Set<string>>();
+      for (const [key, hosts] of environmentHosts) {
+        if (changes.some(change => environmentAncestors(key).includes(change.key))) affected.set(key, new Set(hosts));
+      }
+      for (const tab of await readStoredTabs()) {
+        const key = tabEnvironmentKey(tab);
+        if (!key || !tab.hostId || !changes.some(change => environmentAncestors(key).includes(change.key))) continue;
+        const hosts = affected.get(key) ?? new Set<string>();
+        hosts.add(tab.hostId);
+        affected.set(key, hosts);
+      }
+      const updates = await Promise.allSettled([...affected].flatMap(([scopeKey, hosts]) => {
+        const effective = resolveEnvironment(scopeKey, getStoredEnvironment);
+        return [...hosts].map(async (hostId) => {
+          await host.call("prepareProjectEnvironment", {
+            projectId: scopeKey, entries: effective.entries.map(({ key, value }) => ({ key, value })),
+          }, { hostId });
+          const key = environmentHostKey(scopeKey, hostId);
+          appliedEnvironments.set(key, effective.revision);
+          environmentRetries.delete(key);
+        });
+      }));
+      return { keyCount, pendingHosts: updates.filter(update => update.status === "rejected").length,
+        revisions: changes.map(change => stored[change.key]?.revision ?? 0) };
+    });
+  }
+
   bb.rpc.register(rpcContract, {
     async resolveContext({ projectId, threadId }) {
       let environmentId: string | null = null;
@@ -1140,12 +1200,14 @@ export default async function plugin(bb: BbPluginApi) {
         .map((binding) => binding.shortcut);
     },
 
-    async getProjectEnvironment({ projectId, environmentId }) {
-      await validateEnvironment(projectId, environmentId);
-      const stored = getStoredEnvironment(environmentKey(projectId, environmentId));
-      return stored === undefined
-        ? { text: "", revision: 0 }
-        : { text: stored.text, revision: stored.revision };
+    async getProjectEnvironment({ projectId, environmentId, scope }) {
+      if (!scope) await validateEnvironment(projectId, environmentId);
+      const key = scope === "global" ? GLOBAL_ENVIRONMENT_KEY : environmentKey(projectId, environmentId);
+      const stored = getStoredEnvironment(key);
+      const parent = environmentAncestors(key).at(-2);
+      const inherited = parent ? resolveEnvironment(parent, getStoredEnvironment).entries : [];
+      return { text: stored?.text ?? "", revision: stored?.revision ?? 0,
+        ...(inherited.length ? { inherited } : {}) };
     },
 
     async listProjectEnvironments(input) {
@@ -1189,62 +1251,21 @@ export default async function plugin(bb: BbPluginApi) {
         .sort((a, b) => a.name.localeCompare(b.name)) };
     },
 
-    async saveProjectEnvironment({ projectId: ownerProjectId, environmentId, text, expectedRevision }) {
-      await validateEnvironment(ownerProjectId, environmentId);
-      const projectId = environmentKey(ownerProjectId, environmentId);
-      const entries = parseProjectEnvironment(text);
-      return serializeEnvironment(async () => {
-        const stored = getStoredEnvironments();
-        const currentRevision = stored[projectId]?.revision ?? 0;
-        if (currentRevision !== expectedRevision) {
-          throw new Error(
-            "This project environment changed in another window. Reopen it and try again.",
-          );
-        }
-        if (text === "" && currentRevision === 0) {
-          return { revision: 0, keyCount: 0 };
-        }
-        stored[projectId] = {
-          text,
-          revision: currentRevision + 1,
-          updatedAt: new Date().toISOString(),
-        };
-        const serialized = JSON.stringify({ version: 1, projects: stored });
-        if (
-          new TextEncoder().encode(serialized).byteLength >
-          PROJECT_ENVIRONMENT_VAULT_MAX_BYTES
-        ) {
-          throw new Error("The project environment vault is full.");
-        }
-        const next = stored[projectId];
-        upsertEnvironment.run(
-          projectId,
-          next.text,
-          next.revision,
-          next.updatedAt,
-        );
-        await secureEnvironmentDatabaseFiles();
-        const hosts = new Set([
-          ...(environmentHosts.get(projectId) ?? []),
-          ...(await readStoredTabs())
-            .filter((tab) => tabEnvironmentKey(tab) === projectId)
-            .map((tab) => tab.hostId)
-            .filter((id): id is string => id !== undefined),
-        ]);
-        const updates = await Promise.allSettled([...hosts].map(async (hostId) => {
-          await host.call("prepareProjectEnvironment", { projectId, entries }, { hostId });
-          const key = environmentHostKey(projectId, hostId);
-          appliedEnvironments.set(key, currentRevision + 1);
-          environmentRetries.delete(key);
-        }));
-        return {
-          revision: currentRevision + 1,
-          keyCount: entries.length,
-          ...(updates.some((update) => update.status === "rejected")
-            ? { pendingHosts: updates.filter((update) => update.status === "rejected").length }
-            : {}),
-        };
-      });
+    async saveEnvironmentDefinitions({ projectId, environmentId, layers }) {
+      if (layers.some(layer => layer.scope === "worktree")) {
+        if (!environmentId) throw new Error("A worktree is required for worktree variables.");
+        await validateEnvironment(projectId, environmentId);
+      }
+      const result = await saveEnvironmentLayers(layers.map(layer => ({
+        key: layer.scope === "global" ? GLOBAL_ENVIRONMENT_KEY : environmentKey(projectId, layer.scope === "worktree" ? environmentId : undefined),
+        text: layer.text, expectedRevision: layer.expectedRevision,
+      })));
+      return { keyCount: result.keyCount, ...(result.pendingHosts ? { pendingHosts: result.pendingHosts } : {}) };
+    },
+    async saveProjectEnvironment({ projectId, environmentId, scope, text, expectedRevision }) {
+      if (!scope) await validateEnvironment(projectId, environmentId);
+      const result = await saveEnvironmentLayers([{ key: scope === "global" ? GLOBAL_ENVIRONMENT_KEY : environmentKey(projectId, environmentId), text, expectedRevision }]);
+      return { revision: result.revisions[0]!, keyCount: result.keyCount, ...(result.pendingHosts ? { pendingHosts: result.pendingHosts } : {}) };
     },
 
     async init() {

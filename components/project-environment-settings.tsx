@@ -11,6 +11,7 @@ interface ProjectEnvironmentSummary {
   name: string;
   projectId?: string;
   environmentId?: string;
+  scope?: "global";
   configured: boolean;
   keyCount: number;
   updatedAt: string | null;
@@ -78,6 +79,7 @@ export function ProjectEnvironmentSettings({
           value={query}
           onChange={(event) => setQuery(event.target.value)}
         />
+        <Button variant="outline" size="sm" onClick={() => setSelected({ id: "global", name: "Global", scope: "global", configured: true, keyCount: 0, updatedAt: null })}>Global variables</Button>
         <Button variant="outline" size="sm" onClick={() => void load()}>
           Refresh
         </Button>
@@ -90,7 +92,8 @@ export function ProjectEnvironmentSettings({
       ) : error ? (
         <div className="bb-fg-settings-error" role="alert">
           <span>{error}</span>
-          <Button variant="outline" size="sm" onClick={() => void load()}>
+          <Button variant="outline" size="sm" onClick={() => setSelected({ id: "global", name: "Global", scope: "global", configured: true, keyCount: 0, updatedAt: null })}>Global variables</Button>
+        <Button variant="outline" size="sm" onClick={() => void load()}>
             Try again
           </Button>
         </div>
@@ -109,7 +112,7 @@ export function ProjectEnvironmentSettings({
                 <div className="bb-fg-project-environment-copy">
                   <div className="bb-fg-project-environment-name">
                     <span>{project.name}</span>
-                    <Badge variant="secondary">{project.environmentId ? "Worktree" : "Default checkout"}</Badge>
+                    <Badge variant="secondary">{project.environmentId ? "Worktree" : "Project"}</Badge>
                     <Badge variant="secondary">
                       {`${project.keyCount} variable${project.keyCount === 1 ? "" : "s"}`}
                     </Badge>
@@ -138,6 +141,7 @@ export function ProjectEnvironmentSettings({
         <ProjectEnvironmentManagement
           rpc={rpc}
           projectId={selected.projectId ?? selected.id}
+          initialScope={selected.scope}
           environmentId={selected.environmentId}
           projectLabel={selected.name}
           onDismiss={() => {

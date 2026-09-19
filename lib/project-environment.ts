@@ -9,9 +9,12 @@ export {
   PROJECT_ENVIRONMENT_VAULT_MAX_BYTES,
 } from "./project-environment-limits";
 
+export const DISABLED_VARIABLE_PREFIX = "# @bb-disabled ";
+
 export interface ProjectEnvironmentEntry {
   key: string;
   value: string;
+  enabled?: boolean;
 }
 
 export interface StoredProjectEnvironment {
@@ -95,7 +98,11 @@ export function parseProjectEnvironment(text: string): ProjectEnvironmentEntry[]
       offset += 1;
       continue;
     }
-    if (source[offset] === "#") {
+    const disabled = source.startsWith(DISABLED_VARIABLE_PREFIX, offset);
+    if (disabled) {
+      offset += DISABLED_VARIABLE_PREFIX.length;
+      skipHorizontal();
+    } else if (source[offset] === "#") {
       skipLine();
       continue;
     }
@@ -163,7 +170,7 @@ export function parseProjectEnvironment(text: string): ProjectEnvironmentEntry[]
 
     if (seen.has(key)) syntaxError(source, keyStart, `${key} is assigned more than once.`);
     seen.add(key);
-    entries.push({ key, value });
+    entries.push({ key, value, ...(disabled ? { enabled: false } : {}) });
     if (entries.length > PROJECT_ENVIRONMENT_MAX_KEYS)
       throw new Error(`Project environment may contain at most ${PROJECT_ENVIRONMENT_MAX_KEYS} variables.`);
   }
@@ -176,5 +183,5 @@ export function shellQuote(value: string): string {
 }
 
 export function environmentExportScript(entries: ProjectEnvironmentEntry[]): string {
-  return entries.map(({ key, value }) => `export ${key}=${shellQuote(value)}`).join("\n") + "\n";
+  return entries.filter(entry => entry.enabled !== false).map(({ key, value }) => `export ${key}=${shellQuote(value)}`).join("\n") + "\n";
 }

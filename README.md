@@ -62,17 +62,15 @@ application-menu commands remain controlled by BB/the operating system.
 Exited shells close automatically without a notification. The next live shell
 is selected, or the window hides when no shell remains in the current worktree.
 
-**Environment variables** in the sidebar footer opens the active terminal’s worktree environment.
+**Environment variables** in the sidebar footer replaces the shell viewport with the active terminal’s environment editor. The sidebar stays available, and the shell remains mounted and running. Use **Cancel** or select a sidebar terminal to return. In plugin settings, the editor remains a dialog.
 Each project session’s **⋯** menu also provides **Environment variables…** alongside
 **Rename…**, **Restart shell**, and **Delete terminal…**. The environment editor
-accepts strict dotenv assignments and applies them at the next prompt in zsh,
-bash, and fish only in the selected default checkout or worktree. Each worktree
-has independent variables and starts empty. Existing project values remain on the
-default checkout. Running commands keep
-their current environment. Removed variables are unset. Shells opened before this
-update need one restart to use the isolated worktree environment file; other shells
-apply values at startup. The plugin Settings page lists projects and worktrees,
-including empty environments. Use **Copy to…**, choose a destination, then
+provides key/value rows with masked values, reveal and remove controls, and bulk .env paste into a key field. The **⋯** menu holds **Edit as .env**, **Copy to…**, and **Clear**. Every definition appears in one list with its own scope selector; **Add variable** creates a new row. It accepts strict dotenv assignments and applies them at the next prompt in zsh,
+bash, and fish. Each row selects Global (all terminals), Project (the default checkout and all its worktrees), or Worktree (only this worktree). The same key may appear in multiple scopes; duplicate keys within one scope are rejected. All definitions remain visible, with overridden rows muted. Add the same key in a more specific scope to override it. Changing scope moves the definition; deleting it restores the next inherited value. Save validates all changed scopes and writes them in one transaction, rejecting the entire batch if any revision is stale. An empty value is an explicit override. Existing
+project records now apply to all their worktrees. Running commands keep their
+current environment; updates apply at the next prompt. Older projectless shells
+need a restart to pick up global variables. Settings lists projects and worktrees,
+including empty environments. Use **Copy to…**, select the source scope and destination, then
 **Review copy** to edit the copied variables before saving. Saving replaces the
 destination’s variables; the source is unchanged and future edits are independent.
 Managing another session leaves your current shell selected.
@@ -181,6 +179,17 @@ persistence, window geometry, the actual pinned Ghostty WASM, Unicode, TUI scree
 switches, replay suppression, hidden-tab polling, input, disposal, and overlay
 registration with the BB frontend harness.
 
+### Environment inheritance contract
+
+- Persist each scope separately; merge global → project → worktree when preparing shell files.
+- Per-scope revisions protect atomic batch saves and moves. Validate every changed layer before any write. Refresh signatures include every ancestor revision.
+- Parent saves refresh descendant shell files, including after reconnect and reload.
+- Each row has an enable switch. Disabled definitions retain their value and scope but are excluded from shell resolution; enabled ancestors can take effect.
+- Raw dotenv represents disabled definitions as `# @bb-disabled KEY="value"`; ordinary comments remain ignored. Copy and scope moves preserve this state. Duplicate keys in one scope remain invalid even when disabled.
+- Clearing local variables restores inherited values; explicit empty values override them.
+- Copy transfers local definitions only, leaving inheritance and destination review intact.
+- Global values also apply to projectless terminals.
+
 ### Worktree ownership contract
 
 Keep these rules consistent across the server, overlay, and selection memory:
@@ -223,7 +232,7 @@ window was unavailable during this implementation.
 - `lib/context.ts` defines project visibility, scope priority, and client selection memory.
 - `components/terminal-sidebar.tsx` owns attached search, session list, filters, and footer controls.
 - `components/terminal-management.tsx` owns naming and deletion dialogs.
-- `components/project-environment-management.tsx` owns the project dotenv editor.
+- `components/project-environment-management.tsx` owns the worktree environment dialog; `components/environment-variable-editor.tsx` provides key/value rows and raw dotenv editing.
 - `components/project-environment-settings.tsx` provides the searchable project and worktree
   environment inventory on the plugin Settings page.
 - `lib/shell-integration.ts` installs session-local shell title hooks; `lib/terminal-title.ts`

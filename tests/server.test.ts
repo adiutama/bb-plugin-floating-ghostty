@@ -784,7 +784,7 @@ it("retries saved environment values after a host reconnects without injecting t
   expect(harness.inspection.sdk.callsTo("terminals.input")).toHaveLength(0);
 });
 
-it("isolates worktree variables, host refreshes, and revisions from the project", async () => {
+it("inherits project variables while preserving worktree overrides and separate revisions", async () => {
   const { call, harness, sessions } = await setup();
   harness.inspection.sdk.stub("environments.get", async ({ environmentId }: { environmentId: string }) => ({
     id: environmentId, projectId: "A", name: environmentId,
@@ -792,7 +792,7 @@ it("isolates worktree variables, host refreshes, and revisions from the project"
   }));
   await call("saveProjectEnvironment", { projectId: "A", text: "TOKEN=project", expectedRevision: 0 });
   expect(await call("getProjectEnvironment", { projectId: "A", environmentId: "one" }))
-    .toEqual({ text: "", revision: 0 });
+    .toEqual({ text: "", revision: 0, inherited: [{ key: "TOKEN", value: "project", source: "project" }] });
   await call("saveProjectEnvironment", { projectId: "A", environmentId: "one", text: "TOKEN=one", expectedRevision: 0 });
   const opened = await call("openTab", { scopeKey: "worktree:A:one", cols: 80, rows: 24 }) as any;
   await call("openTab", { scopeKey: "worktree:A:two", cols: 80, rows: 24 });
@@ -800,11 +800,15 @@ it("isolates worktree variables, host refreshes, and revisions from the project"
   const prepared = harness.inspection.experimental_hostRpcCalls.filter((call) => call.method === "prepareProjectEnvironment");
   expect(prepared.slice(-2).map((call) => call.input)).toEqual([
     { projectId: JSON.stringify(["A", "one"]), entries: [{ key: "TOKEN", value: "one" }] },
-    { projectId: JSON.stringify(["A", "two"]), entries: [] },
+    { projectId: JSON.stringify(["A", "two"]), entries: [{ key: "TOKEN", value: "project" }] },
   ]);
   const before = prepared.length;
   await call("saveProjectEnvironment", { projectId: "A", text: "TOKEN=updated", expectedRevision: 1 });
-  expect(harness.inspection.experimental_hostRpcCalls.filter((call) => call.method === "prepareProjectEnvironment")).toHaveLength(before);
+  expect(harness.inspection.experimental_hostRpcCalls.filter((call) => call.method === "prepareProjectEnvironment")).toHaveLength(before + 2);
+  expect(harness.inspection.experimental_hostRpcCalls.filter((call) => call.method === "prepareProjectEnvironment").slice(-2).map(call => call.input)).toEqual([
+    { projectId: JSON.stringify(["A", "one"]), entries: [{ key: "TOKEN", value: "one" }] },
+    { projectId: JSON.stringify(["A", "two"]), entries: [{ key: "TOKEN", value: "updated" }] },
+  ]);
   await expect(call("saveProjectEnvironment", { projectId: "A", environmentId: "one", text: "TOKEN=stale", expectedRevision: 0 })).rejects.toThrow(/changed/);
   await expect(call("getProjectEnvironment", { projectId: "B", environmentId: "one" })).rejects.toThrow(/no longer available/);
   const reloaded = await harness.lifecycle.reload(plugin);
@@ -818,7 +822,7 @@ it("isolates worktree variables, host refreshes, and revisions from the project"
   }));
   sdk.stub("terminals.get", async ({ terminalId }: { terminalId: string }) => sessions.get(terminalId));
   const reloadedCall = reloaded.harness.behavior.callRpc;
-  expect(await reloadedCall("getProjectEnvironment", { projectId: "A", environmentId: "one" })).toEqual({ text: "TOKEN=one", revision: 1 });
+  expect(await reloadedCall("getProjectEnvironment", { projectId: "A", environmentId: "one" })).toEqual({ text: "TOKEN=one", revision: 1, inherited: [{ key: "TOKEN", value: "updated", source: "project" }] });
   const snapshot = await reloadedCall("init", null) as any;
   expect(snapshot.snapshot.tabs.find((tab: any) => tab.terminalId === opened.opened.terminalId).launchScopeKey).toBe("worktree:A:one");
 });
@@ -859,4 +863,76 @@ it("reuses an existing worktree shell and coalesces simultaneous automatic opens
   expect(sibling.opened.terminalId).not.toBe(results[0].opened.terminalId);
   await call("openTab", { ...input, reuseExisting: false });
   expect(harness.inspection.sdk.callsTo("terminals.create")).toHaveLength(3);
+});
+
+it("merges global, project, and worktree layers and restores inherited values after clearing", async () => {
+  const { call, harness } = await setup();
+  harness.inspection.sdk.stub("environments.get", async ({ environmentId }: { environmentId: string }) => ({
+    id: environmentId, projectId: "A", name: environmentId, path: `/a/${environmentId}`, hostId: "local", status: "ready",
+  }));
+  await call("saveProjectEnvironment", { projectId: "A", scope: "global", text: "TOKEN=global\nSHARED=yes", expectedRevision: 0 });
+  await call("saveProjectEnvironment", { projectId: "A", text: "TOKEN=project", expectedRevision: 0 });
+  await call("saveProjectEnvironment", { projectId: "A", environmentId: "one", text: 'TOKEN=""', expectedRevision: 0 });
+  await call("openTab", { scopeKey: "worktree:A:one", cols: 80, rows: 24 });
+  const prepared = () => harness.inspection.experimental_hostRpcCalls.filter(call => call.method === "prepareProjectEnvironment").at(-1)?.input;
+  expect(prepared()).toEqual({ projectId: '["A","one"]', entries: [{ key: "TOKEN", value: "" }, { key: "SHARED", value: "yes" }] });
+  await call("saveProjectEnvironment", { projectId: "A", environmentId: "one", text: "", expectedRevision: 1 });
+  expect(prepared()).toEqual({ projectId: '["A","one"]', entries: [{ key: "TOKEN", value: "project" }, { key: "SHARED", value: "yes" }] });
+  await call("saveProjectEnvironment", { projectId: "A", text: "", expectedRevision: 1 });
+  expect(prepared()).toEqual({ projectId: '["A","one"]', entries: [{ key: "TOKEN", value: "global" }, { key: "SHARED", value: "yes" }] });
+  await call("saveProjectEnvironment", { projectId: "A", scope: "global", text: "TOKEN=latest", expectedRevision: 1 });
+  expect(prepared()).toEqual({ projectId: '["A","one"]', entries: [{ key: "TOKEN", value: "latest" }] });
+  expect(await call("getProjectEnvironment", { projectId: "A", environmentId: "one" })).toEqual({ text: "", revision: 2, inherited: [{ key: "TOKEN", value: "latest", source: "global" }] });
+  expect(harness.inspection.sdk.callsTo("terminals.input")).toHaveLength(0);
+});
+
+it("applies global variables to projectless terminals", async () => {
+  const { call, harness } = await setup();
+  await call("saveProjectEnvironment", { projectId: "global", scope: "global", text: "SHARED=all", expectedRevision: 0 });
+  await call("openTab", { scopeKey: "home:local", cols: 80, rows: 24 });
+  expect(harness.inspection.experimental_hostRpcCalls.filter(call => call.method === "prepareProjectEnvironment").at(-1)?.input).toEqual({
+    projectId: '["global"]', entries: [{ key: "SHARED", value: "all" }],
+  });
+});
+
+it("saves scope moves atomically and rejects stale or invalid batches without partial changes", async () => {
+  const { call, harness } = await setup();
+  harness.inspection.sdk.stub("environments.get", async () => ({ id: "one", projectId: "A", name: "one", path: "/a/one", hostId: "local", status: "ready" }));
+  await call("saveEnvironmentDefinitions", { projectId: "A", environmentId: "one", layers: [
+    { scope: "project", text: "TOKEN=shared", expectedRevision: 0 },
+    { scope: "worktree", text: "TOKEN=local", expectedRevision: 0 },
+  ] });
+  await expect(call("saveEnvironmentDefinitions", { projectId: "A", environmentId: "one", layers: [
+    { scope: "global", text: "TOKEN=moved", expectedRevision: 0 },
+    { scope: "worktree", text: "", expectedRevision: 0 },
+  ] })).rejects.toThrow(/changed/);
+  expect(await call("getProjectEnvironment", { projectId: "A", scope: "global" })).toEqual({ text: "", revision: 0 });
+  await expect(call("saveEnvironmentDefinitions", { projectId: "A", environmentId: "one", layers: [
+    { scope: "global", text: "TOKEN=moved", expectedRevision: 0 },
+    { scope: "worktree", text: "TOKEN=a\nTOKEN=b", expectedRevision: 1 },
+  ] })).rejects.toThrow(/assigned more than once/);
+  expect(await call("getProjectEnvironment", { projectId: "A", scope: "global" })).toEqual({ text: "", revision: 0 });
+  await call("saveEnvironmentDefinitions", { projectId: "A", environmentId: "one", layers: [
+    { scope: "global", text: "TOKEN=local", expectedRevision: 0 },
+    { scope: "worktree", text: "", expectedRevision: 1 },
+  ] });
+  expect(await call("getProjectEnvironment", { projectId: "A", scope: "global" })).toEqual({ text: "TOKEN=local", revision: 1 });
+  expect(await call("getProjectEnvironment", { projectId: "A", environmentId: "one" })).toMatchObject({ text: "", revision: 2, inherited: [{ key: "TOKEN", value: "shared", source: "project" }] });
+});
+
+it("persists disabled variables and falls back to enabled ancestors until re-enabled", async () => {
+  const { call, harness } = await setup();
+  harness.inspection.sdk.stub("environments.get", async () => ({ id: "one", projectId: "A", name: "one", path: "/a/one", hostId: "local", status: "ready" }));
+  await call("saveEnvironmentDefinitions", { projectId: "A", environmentId: "one", layers: [
+    { scope: "project", text: "TOKEN=parent", expectedRevision: 0 },
+    { scope: "worktree", text: "TOKEN=local\nONLY_HERE=local", expectedRevision: 0 },
+  ] });
+  await call("openTab", { scopeKey: "worktree:A:one", cols: 80, rows: 24 });
+  const prepared = () => harness.inspection.experimental_hostRpcCalls.filter(call => call.method === "prepareProjectEnvironment").at(-1)?.input;
+  const disabledText = '# @bb-disabled TOKEN="local"\n# @bb-disabled ONLY_HERE="local"';
+  await call("saveEnvironmentDefinitions", { projectId: "A", environmentId: "one", layers: [{ scope: "worktree", text: disabledText, expectedRevision: 1 }] });
+  expect(prepared()).toEqual({ projectId: '["A","one"]', entries: [{ key: "TOKEN", value: "parent" }] });
+  expect(await call("getProjectEnvironment", { projectId: "A", environmentId: "one" })).toMatchObject({ text: disabledText, revision: 2 });
+  await call("saveEnvironmentDefinitions", { projectId: "A", environmentId: "one", layers: [{ scope: "worktree", text: 'TOKEN="local"\n# @bb-disabled ONLY_HERE="local"', expectedRevision: 2 }] });
+  expect(prepared()).toEqual({ projectId: '["A","one"]', entries: [{ key: "TOKEN", value: "local" }] });
 });

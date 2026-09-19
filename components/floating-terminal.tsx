@@ -1057,7 +1057,7 @@ export function FloatingTerminal({
           />
         </div>
 
-        <div className="bb-fg-workspace">
+        <div className="bb-fg-workspace" data-view={mode === "environment" ? "environment" : "terminal"}>
           {sidebarOpen ? <TerminalSidebar
               tabs={availableTabs}
               scopes={scopes}
@@ -1111,7 +1111,7 @@ export function FloatingTerminal({
                 rpc={rpc}
                 terminalId={tab.terminalId}
                 visible={
-                  open && !loading && activeTab?.terminalId === tab.terminalId
+                  open && !loading && mode !== "environment" && activeTab?.terminalId === tab.terminalId
                 }
                 focused={
                   open &&
@@ -1140,7 +1140,7 @@ export function FloatingTerminal({
               <span>{activeTab.statusDetail ?? "Connection interrupted. Retrying…"}</span>
             </div>
           ) : null}
-          {findOpen && activeTab !== null ? (
+          {findOpen && activeTab !== null && mode !== "environment" ? (
             <FindBar
               query={findQuery}
               results={findResults}
@@ -1179,7 +1179,7 @@ export function FloatingTerminal({
               </div>
             </div>
           ) : null}
-          {!loading && loadError ? (
+          {!loading && loadError && mode !== "environment" ? (
             <div className="bb-fg-state" role="alert">
               <p>{loadError}</p>
               <div>
@@ -1187,7 +1187,7 @@ export function FloatingTerminal({
               </div>
             </div>
           ) : null}
-          {!loading && !loadError && !activeTab ? (
+          {!loading && !loadError && !activeTab && mode !== "environment" ? (
             <div className="bb-fg-state">
               <p>No terminal selected.</p>
               <button onClick={() => createInContext()} disabled={creating}>
@@ -1210,12 +1210,13 @@ export function FloatingTerminal({
           managedTab &&
           ownerOf(managedTab.scopeKey).projectId ? (
             <ProjectEnvironmentManagement
+              embedded
               key={`environment:${managedTab.scopeKey}`}
               rpc={rpc}
               projectId={ownerOf(managedTab.scopeKey).projectId!}
               environmentId={ownerOf(managedTab.launchScopeKey ?? managedTab.scopeKey).environmentId ?? undefined}
               projectLabel={scopeLabel(managedTab.scopeKey, scopes)}
-              onDismiss={dismissManagement}
+              onDismiss={() => setMode("shell")}
             />
           ) : null}
 

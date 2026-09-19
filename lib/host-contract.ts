@@ -19,7 +19,7 @@ export const hostContract = defineRpcContract({
               })
               .strict(),
           )
-          .max(PROJECT_ENVIRONMENT_MAX_KEYS),
+          .max(PROJECT_ENVIRONMENT_MAX_KEYS * 3) // Global + project + worktree layers.,
       })
       .strict(),
     output: z.object({ path: z.string() }).strict(),

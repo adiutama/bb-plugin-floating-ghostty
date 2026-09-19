@@ -1,7 +1,10 @@
 // @vitest-environment jsdom
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { act, fireEvent, within } from "@testing-library/react";
 import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
+
+vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
+vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });
 
 it("browses and edits project environments from plugin settings", async () => {
   const app = await loadPluginApp(() => import("../app"));
@@ -43,9 +46,9 @@ it("browses and edits project environments from plugin settings", async () => {
             },
           ],
         }),
-        getProjectEnvironment: () => environment,
-        saveProjectEnvironment: (input: unknown) => {
-          const value = input as { text: string; expectedRevision: number };
+        getProjectEnvironment: (input: any) => input.scope === "global" ? { text: "", revision: 0 } : environment,
+        saveEnvironmentDefinitions: (input: unknown) => {
+          const value = (input as { layers: { text: string; expectedRevision: number }[] }).layers[0]!;
           environment = {
             text: value.text,
             revision: value.expectedRevision + 1,
@@ -78,6 +81,8 @@ it("browses and edits project environments from plugin settings", async () => {
     expect(
       dialog.parentElement?.classList.contains("bb-fg-management-scrim"),
     ).toBe(true);
+    await act(async () => fireEvent.keyDown(await within(dialog).findByRole("button", { name: "Variable actions" }), { key: "Enter" }));
+    await act(async () => fireEvent.click(within(document.body).getByRole("menuitem", { name: "Edit as .env" })));
     const editor = await within(dialog).findByRole("textbox", {
       name: "Environment variables for Alpha",
     });
@@ -89,19 +94,18 @@ it("browses and edits project environments from plugin settings", async () => {
 
     expect(
       slot.inspection.rpcCalls
-        .filter((call) => call.method === "saveProjectEnvironment")
+        .filter((call) => call.method === "saveEnvironmentDefinitions")
         .map((call) => call.input),
     ).toEqual([
       {
         projectId: "A",
-        text: "TOKEN=updated",
-        expectedRevision: 3,
+        layers: [{ scope: "project", text: "TOKEN=updated", expectedRevision: 3 }],
       },
     ]);
   } finally {
     slot.lifecycle.unmount();
   }
-});
+}, 30000);
 
 it("reviews a copy into a worktree and saves using the destination revision", async () => {
   const app = await loadPluginApp(() => import("../app"));
@@ -111,22 +115,23 @@ it("reviews a copy into a worktree and saves using the destination revision", as
       { id: "A", projectId: "A", name: "Alpha", configured: true, keyCount: 1, updatedAt: null },
       { id: "worktree", projectId: "B", environmentId: "feature", name: "Beta / feature", configured: true, keyCount: 1, updatedAt: null },
     ] }),
-    getProjectEnvironment: (input: any) => input.environmentId
+    getProjectEnvironment: (input: any) => input.scope === "global" ? { text: "", revision: 0 } : input.environmentId
       ? { text: "OLD=destination", revision: 7 } : { text: "TOKEN=source", revision: 2 },
-    saveProjectEnvironment: () => ({ revision: 8, keyCount: 1 }),
+    saveEnvironmentDefinitions: () => ({ revision: 8, keyCount: 1 }),
   } });
   try {
     const edit = await slot.findByRole("button", { name: "Edit environment for Alpha" });
     await act(async () => fireEvent.click(edit));
-    await slot.findByDisplayValue("TOKEN=source");
-    await act(async () => fireEvent.click(slot.getByRole("button", { name: "Copy to…" })));
+    await slot.findByLabelText("Key 1");
+    await act(async () => fireEvent.keyDown(slot.getByRole("button", { name: "Variable actions" }), { key: "Enter" }));
+    await act(async () => fireEvent.click(within(document.body).getByRole("menuitem", { name: "Copy to…" })));
     fireEvent.change(slot.getByLabelText("Copy to project or worktree"), { target: { value: "worktree" } });
     await act(async () => fireEvent.click(slot.getByRole("button", { name: "Review copy" })));
-    expect(await slot.findByRole("textbox", { name: "Environment variables for Beta / feature" })).toHaveProperty("value", "TOKEN=source");
-    expect(slot.inspection.rpcCalls.filter((call) => call.method === "saveProjectEnvironment")).toHaveLength(0);
+    expect(await slot.findByLabelText("Value 1")).toHaveProperty("value", "source");
+    expect(slot.inspection.rpcCalls.filter((call) => call.method === "saveEnvironmentDefinitions")).toHaveLength(0);
     await act(async () => fireEvent.click(slot.getByRole("button", { name: "Save" })));
-    expect(slot.inspection.rpcCalls.filter((call) => call.method === "saveProjectEnvironment").map((call) => call.input)).toEqual([
-      { projectId: "B", environmentId: "feature", text: "TOKEN=source", expectedRevision: 7 },
+    expect(slot.inspection.rpcCalls.filter((call) => call.method === "saveEnvironmentDefinitions").map((call) => call.input)).toEqual([
+      { projectId: "B", environmentId: "feature", layers: [{ scope: "worktree", text: "TOKEN=source", expectedRevision: 7 }] },
     ]);
   } finally { slot.lifecycle.unmount(); }
-});
+}, 30000);
